@@ -237,16 +237,17 @@ startPriorityListener().catch((err) => {
   process.exit(1)
 })
 
-process.on('SIGINT', async () => {
-  console.log('\n[Priority EVM Decoder] Shutting down...')
-  await pool.end()
-  process.exit(0)
-})
+let shuttingDown = false
 
-process.on('SIGTERM', async () => {
+async function shutdown() {
+  if (shuttingDown) return
+  shuttingDown = true
   console.log('\n[Priority EVM Decoder] Shutting down...')
   await pool.end()
   process.exit(0)
-})
+}
+
+process.on('SIGINT', shutdown)
+process.on('SIGTERM', shutdown)
 
 export { decodeSingleTransaction }
