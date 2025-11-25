@@ -163,13 +163,23 @@ async function processBatch(pool: pg.Pool, root: protobuf.Root): Promise<number>
 			const { tx_id, raw_bytes, gas_used } = row
 
 			const decoded = decodeTransaction(raw_bytes, tx_id, gas_used)
-			if (!decoded) continue
+			if (!decoded) {
+				// Insert placeholder to prevent infinite retry on decode failures
+				await client.query(
+					`INSERT INTO api.evm_transactions (tx_id, hash, "from", status)
+					 VALUES ($1, $2, '', -1)
+					 ON CONFLICT (tx_id) DO NOTHING`,
+					[tx_id, `decode_failed_${tx_id.slice(0, 16)}`]
+				)
+				continue
+			}
 
 			const responseQuery = await client.query(
 				'SELECT data->\'tx_response\'->\'data\' as response_data FROM api.transactions_raw WHERE id = $1',
 				[tx_id]
 			)
 
+			// Try to enrich with response data if available
 			if (responseQuery.rows.length > 0 && responseQuery.rows[0].response_data) {
 				const responseHex = responseQuery.rows[0].response_data
 				const decodedResponse = await decodeTxResponse(responseHex, root)
@@ -178,50 +188,13 @@ async function processBatch(pool: pg.Pool, root: protobuf.Root): Promise<number>
 					decoded.gas_used = decodedResponse.gasUsed
 					decoded.status = decodedResponse.vmError ? 0 : 1
 
-					if (decoded.data && decoded.data.length >= 10) {
-						const selector = decoded.data.slice(0, 10)
-						const signature = await fetch4ByteSignature(selector)
-						if (signature) {
-							decoded.function_signature = signature
-							const funcName = signature.split('(')[0]
-							decoded.function_name = funcName
-						}
-					}
-
-					await client.query(
-						`INSERT INTO api.evm_transactions (
-              tx_id, hash, "from", "to", nonce, gas_limit, gas_price,
-              max_fee_per_gas, max_priority_fee_per_gas, value, data, type,
-              chain_id, gas_used, status, function_name, function_signature
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
-            ON CONFLICT (tx_id) DO NOTHING`,
-						[
-							decoded.tx_id,
-							decoded.hash,
-							decoded.from,
-							decoded.to,
-							decoded.nonce,
-							decoded.gas_limit.toString(),
-							decoded.gas_price.toString(),
-							decoded.max_fee_per_gas?.toString() || null,
-							decoded.max_priority_fee_per_gas?.toString() || null,
-							decoded.value.toString(),
-							decoded.data,
-							decoded.type,
-							decoded.chain_id?.toString() || null,
-							decoded.gas_used,
-							decoded.status,
-							decoded.function_name,
-							decoded.function_signature,
-						]
-					)
-
+					// Process logs if we have response data
 					for (const log of decodedResponse.logs) {
 						log.tx_id = tx_id
 						await client.query(
 							`INSERT INTO api.evm_logs (tx_id, log_index, address, topics, data)
-               VALUES ($1, $2, $3, $4, $5)
-               ON CONFLICT (tx_id, log_index) DO NOTHING`,
+							 VALUES ($1, $2, $3, $4, $5)
+							 ON CONFLICT (tx_id, log_index) DO NOTHING`,
 							[log.tx_id, log.log_index, log.address, log.topics, log.data]
 						)
 
@@ -233,21 +206,60 @@ async function processBatch(pool: pg.Pool, root: protobuf.Root): Promise<number>
 
 							await client.query(
 								`INSERT INTO api.evm_token_transfers (tx_id, log_index, token_address, from_address, to_address, value)
-                 VALUES ($1, $2, $3, $4, $5, $6)
-                 ON CONFLICT (tx_id, log_index) DO NOTHING`,
+								 VALUES ($1, $2, $3, $4, $5, $6)
+								 ON CONFLICT (tx_id, log_index) DO NOTHING`,
 								[tx_id, log.log_index, log.address, fromAddr, toAddr, value]
 							)
 
 							await client.query(
 								`INSERT INTO api.evm_tokens (address, type, is_verified)
-                 VALUES ($1, 'ERC20', false)
-                 ON CONFLICT (address) DO NOTHING`,
+								 VALUES ($1, 'ERC20', false)
+								 ON CONFLICT (address) DO NOTHING`,
 								[log.address]
 							)
 						}
 					}
 				}
 			}
+
+			// Lookup function signature if we have call data
+			if (decoded.data && decoded.data.length >= 10) {
+				const selector = decoded.data.slice(0, 10)
+				const signature = await fetch4ByteSignature(selector)
+				if (signature) {
+					decoded.function_signature = signature
+					decoded.function_name = signature.split('(')[0]
+				}
+			}
+
+			// Always insert the transaction to prevent infinite loop
+			await client.query(
+				`INSERT INTO api.evm_transactions (
+					tx_id, hash, "from", "to", nonce, gas_limit, gas_price,
+					max_fee_per_gas, max_priority_fee_per_gas, value, data, type,
+					chain_id, gas_used, status, function_name, function_signature
+				) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+				ON CONFLICT (tx_id) DO NOTHING`,
+				[
+					decoded.tx_id,
+					decoded.hash,
+					decoded.from,
+					decoded.to,
+					decoded.nonce,
+					decoded.gas_limit.toString(),
+					decoded.gas_price.toString(),
+					decoded.max_fee_per_gas?.toString() || null,
+					decoded.max_priority_fee_per_gas?.toString() || null,
+					decoded.value.toString(),
+					decoded.data,
+					decoded.type,
+					decoded.chain_id?.toString() || null,
+					decoded.gas_used,
+					decoded.status,
+					decoded.function_name,
+					decoded.function_signature,
+				]
+			)
 		}
 
 		await client.query('COMMIT')
