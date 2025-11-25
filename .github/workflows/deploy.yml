@@ -1,7 +1,10 @@
 name: Deploy to Fly.io
 
 on:
-  push:
+  workflow_run:
+    workflows: ["build"]
+    types:
+      - completed
     branches:
       - main
   workflow_dispatch:
@@ -10,6 +13,7 @@ jobs:
   deploy:
     name: Deploy Middleware
     runs-on: ubuntu-latest
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
     steps:
       - uses: actions/checkout@v4
 
