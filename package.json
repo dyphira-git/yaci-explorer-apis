@@ -11,7 +11,8 @@
 		"typecheck": "yarn workspace @yaci/client typecheck",
 		"migrate": "./scripts/migrate.sh",
 		"migrate:dry": "./scripts/migrate.sh --dry-run",
-		"decode:evm": "npx tsx scripts/decode-evm.ts"
+		"decode:evm": "npx tsx scripts/decode-evm.ts",
+		"test:evm-hash-lookup": "npx tsx scripts/test-evm-hash-lookup.ts"
 	},
 	"dependencies": {
 		"ethers": "^6.15.0",
