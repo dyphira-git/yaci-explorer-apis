@@ -7,10 +7,11 @@
 -- CORE TABLES (populated by Yaci indexer)
 -- =============================================================================
 
--- Raw block data
+-- Raw block data (written by yaci indexer)
 CREATE TABLE IF NOT EXISTS api.blocks_raw (
   id BIGINT PRIMARY KEY,
-  data JSONB NOT NULL
+  data JSONB NOT NULL,
+  tx_count INTEGER DEFAULT 0
 );
 
 -- Raw transaction data
@@ -49,6 +50,15 @@ CREATE TABLE IF NOT EXISTS api.messages_main (
   PRIMARY KEY (id, message_index)
 );
 
+-- Raw events data (populated by trigger from transactions_raw)
+CREATE TABLE IF NOT EXISTS api.events_raw (
+  id TEXT NOT NULL,
+  event_index BIGINT NOT NULL,
+  data JSONB NOT NULL,
+  PRIMARY KEY (id, event_index),
+  FOREIGN KEY (id) REFERENCES api.transactions_raw(id) ON DELETE CASCADE
+);
+
 -- Parsed events
 CREATE TABLE IF NOT EXISTS api.events_main (
   id TEXT NOT NULL,
@@ -62,6 +72,7 @@ CREATE TABLE IF NOT EXISTS api.events_main (
 );
 
 -- Core indexes
+CREATE INDEX IF NOT EXISTS idx_blocks_tx_count ON api.blocks_raw(tx_count) WHERE tx_count > 0;
 CREATE INDEX IF NOT EXISTS idx_tx_height ON api.transactions_main(height DESC);
 CREATE INDEX IF NOT EXISTS idx_tx_timestamp ON api.transactions_main(timestamp DESC);
 CREATE INDEX IF NOT EXISTS idx_msg_type ON api.messages_main(type);
