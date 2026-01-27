@@ -23,7 +23,7 @@ import pg from 'pg'
 const { Pool } = pg
 
 const DATABASE_URL = process.env.DATABASE_URL || 'postgres://postgres:bOqwmcryOQcdmrO@localhost:15432/postgres?sslmode=disable'
-const CHAIN_QUERY_URL = process.env.CHAIN_QUERY_URL || 'http://localhost:3001'
+const CHAIN_QUERY_URL = process.env.CHAIN_QUERY_URL || 'https://yaci-explorer-apis.fly.dev'
 const REFRESH_INTERVAL_MS = parseInt(process.env.REFRESH_INTERVAL_MS || '900000', 10)
 
 /** Maps gRPC status enum to DB status string */
