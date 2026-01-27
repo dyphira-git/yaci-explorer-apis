@@ -18,11 +18,13 @@ primary_region = 'sjc'
   PGRST_SERVER_PORT = '3000'
   POLL_INTERVAL_MS = '5000'
   BATCH_SIZE = '100'
+  CHAIN_QUERY_URL = 'https://yaci-explorer-apis.fly.dev'
 
 [processes]
   app = "npx tsx scripts/api-gateway.ts"
   worker = "npx tsx scripts/decode-evm-daemon.ts"
   priority_decoder = "npx tsx scripts/decode-evm-single.ts"
+  validator_refresh = "npx tsx scripts/validator-refresh.ts"
 
 [http_service]
   internal_port = 3000
@@ -49,4 +51,4 @@ primary_region = 'sjc'
   memory = '512mb'
   cpu_kind = 'shared'
   cpus = 1
-  processes = ['worker', 'priority_decoder']
+  processes = ['worker', 'priority_decoder', 'validator_refresh']
