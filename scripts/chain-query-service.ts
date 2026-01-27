@@ -316,15 +316,25 @@ class ChainQueryClient {
 
 	// Staking queries
 
-	/** Fetches validators from chain, optionally filtered by status */
-	async getValidators(status?: string): Promise<any> {
-		const stub = this.getStub('cosmos.staking.v1beta1.Query', {
+	/** Returns all staking gRPC method definitions (shared across staking methods to avoid stub cache conflicts) */
+	private stakingMethods() {
+		return {
 			Validators: {
 				path: '/cosmos.staking.v1beta1.Query/Validators',
 				requestType: 'cosmos.staking.v1beta1.QueryValidatorsRequest',
 				responseType: 'cosmos.staking.v1beta1.QueryValidatorsResponse',
 			},
-		})
+			Pool: {
+				path: '/cosmos.staking.v1beta1.Query/Pool',
+				requestType: 'cosmos.staking.v1beta1.QueryPoolRequest',
+				responseType: 'cosmos.staking.v1beta1.QueryPoolResponse',
+			},
+		}
+	}
+
+	/** Fetches validators from chain, optionally filtered by status */
+	async getValidators(status?: string): Promise<any> {
+		const stub = this.getStub('cosmos.staking.v1beta1.Query', this.stakingMethods())
 
 		const statusMap: Record<string, number> = {
 			'BOND_STATUS_UNSPECIFIED': 0,
@@ -372,13 +382,7 @@ class ChainQueryClient {
 
 	/** Fetches the staking pool (bonded/not-bonded totals) */
 	async getStakingPool(): Promise<any> {
-		const stub = this.getStub('cosmos.staking.v1beta1.Query', {
-			Pool: {
-				path: '/cosmos.staking.v1beta1.Query/Pool',
-				requestType: 'cosmos.staking.v1beta1.QueryPoolRequest',
-				responseType: 'cosmos.staking.v1beta1.QueryPoolResponse',
-			},
-		})
+		const stub = this.getStub('cosmos.staking.v1beta1.Query', this.stakingMethods())
 
 		return new Promise((resolve, reject) => {
 			stub.Pool({}, (err: Error | null, response: any) => {
