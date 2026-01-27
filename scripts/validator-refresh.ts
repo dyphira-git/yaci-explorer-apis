@@ -157,7 +157,10 @@ async function refreshValidators(pool: pg.Pool): Promise<void> {
 
 	const [validators, pool_info] = await Promise.all([
 		fetchValidators(),
-		fetchStakingPool(),
+		fetchStakingPool().catch(err => {
+			console.warn(`[ValidatorRefresh] Staking pool fetch failed (non-fatal): ${err.message}`)
+			return { bondedTokens: '0', notBondedTokens: '0' }
+		}),
 	])
 
 	console.log(`[ValidatorRefresh] Fetched ${validators.length} validators from chain`)
