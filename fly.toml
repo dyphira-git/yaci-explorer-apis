@@ -9,6 +9,9 @@ primary_region = 'sjc'
 [build]
   dockerfile = "docker/Dockerfile"
 
+[deploy]
+  release_command = "npx tsx scripts/run-migrations.ts"
+
 [env]
   PGRST_DB_ANON_ROLE = 'web_anon'
   PGRST_DB_SCHEMAS = 'api'
