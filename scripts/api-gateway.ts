@@ -82,8 +82,8 @@ function proxyRequest(
 const server = http.createServer((req, res) => {
 	const url = req.url || '/'
 
-	// Route /chain/* to chain query service
-	if (url.startsWith('/chain')) {
+	// Route /chain/* to chain query service (but not /chain_stats, etc.)
+	if (url.startsWith('/chain/') || url === '/chain') {
 		proxyRequest(req, res, CHAIN_QUERY_PORT)
 		return
 	}

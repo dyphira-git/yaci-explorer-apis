@@ -3,7 +3,11 @@
  * Migration Runner
  *
  * Executes SQL migration files in order, tracking applied migrations
- * in a `schema_migrations` table to avoid re-running.
+ * in a `yaci_migrations` table to avoid re-running.
+ *
+ * Uses `yaci_migrations` instead of `schema_migrations` because the
+ * latter is owned by golang-migrate (the Go indexer) with an
+ * incompatible schema (version/dirty vs filename/applied_at).
  *
  * Used as a Fly.io release command to run migrations before deploy.
  */
@@ -13,6 +17,7 @@ import { join } from "path"
 import pg from "pg"
 
 const MIGRATIONS_DIR = join(import.meta.dirname, "..", "migrations")
+const TRACKING_TABLE = "public.yaci_migrations"
 
 async function run() {
 	const dbUri = process.env.PGRST_DB_URI || process.env.DATABASE_URL
@@ -28,11 +33,11 @@ async function run() {
 	// Ensure tracking table exists
 	const { rowCount: tableExisted } = await client.query(`
 		SELECT 1 FROM information_schema.tables
-		WHERE table_schema = 'public' AND table_name = 'schema_migrations'
+		WHERE table_schema = 'public' AND table_name = 'yaci_migrations'
 	`)
 
 	await client.query(`
-		CREATE TABLE IF NOT EXISTS public.schema_migrations (
+		CREATE TABLE IF NOT EXISTS ${TRACKING_TABLE} (
 			filename TEXT PRIMARY KEY,
 			applied_at TIMESTAMPTZ NOT NULL DEFAULT now()
 		)
@@ -51,24 +56,20 @@ async function run() {
 			const files = (await readdir(MIGRATIONS_DIR))
 				.filter((f) => f.endsWith(".sql") && !f.endsWith(".backup"))
 				.sort()
-			// Seed all files that existed before this runner was introduced (001-020)
-			const preExisting = files.filter((f) => {
-				const num = parseInt(f.split("_")[0], 10)
-				return num <= 20
-			})
-			for (const file of preExisting) {
+			// Seed all migrations that existed before this runner was introduced
+			for (const file of files) {
 				await client.query(
-					"INSERT INTO public.schema_migrations (filename) VALUES ($1) ON CONFLICT DO NOTHING",
+					`INSERT INTO ${TRACKING_TABLE} (filename) VALUES ($1) ON CONFLICT DO NOTHING`,
 					[file]
 				)
 			}
-			console.log(`[migrate] Seeded ${preExisting.length} pre-existing migrations`)
+			console.log(`[migrate] Seeded ${files.length} pre-existing migrations`)
 		}
 	}
 
 	// Get already-applied migrations
 	const { rows: applied } = await client.query(
-		"SELECT filename FROM public.schema_migrations ORDER BY filename"
+		`SELECT filename FROM ${TRACKING_TABLE} ORDER BY filename`
 	)
 	const appliedSet = new Set(applied.map((r: { filename: string }) => r.filename))
 	console.log(`[migrate] ${appliedSet.size} migrations already applied`)
@@ -88,7 +89,7 @@ async function run() {
 		try {
 			await client.query(sql)
 			await client.query(
-				"INSERT INTO public.schema_migrations (filename) VALUES ($1)",
+				`INSERT INTO ${TRACKING_TABLE} (filename) VALUES ($1)`,
 				[file]
 			)
 			ranCount++
