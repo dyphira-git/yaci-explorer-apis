@@ -102,6 +102,15 @@ async function upsertValidator(client: pg.PoolClient, validator: any): Promise<v
 		return val
 	}
 
+	/** Converts Cosmos SDK Dec format (10^18) commission rates to decimal */
+	const parseRate = (val: string | undefined): string | null => {
+		if (!val) return null
+		const n = Number(val)
+		if (n === 0) return '0'
+		if (n > 1) return (n / 1e18).toString()
+		return val
+	}
+
 	await client.query(
 		`INSERT INTO api.validators (
 			operator_address, moniker, identity, website, details,
@@ -129,9 +138,9 @@ async function upsertValidator(client: pg.PoolClient, validator: any): Promise<v
 			desc.identity || null,
 			desc.website || null,
 			desc.details || null,
-			parseNum(rates.rate),
-			parseNum(rates.maxRate),
-			parseNum(rates.maxChangeRate),
+			parseRate(rates.rate),
+			parseRate(rates.maxRate),
+			parseRate(rates.maxChangeRate),
 			parseNum(validator.minSelfDelegation),
 			parseNum(validator.tokens),
 			parseNum(validator.delegatorShares),
