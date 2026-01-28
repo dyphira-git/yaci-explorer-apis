@@ -16,6 +16,8 @@ primary_region = 'sjc'
   PGRST_DB_ANON_ROLE = 'web_anon'
   PGRST_DB_SCHEMAS = 'api'
   PGRST_SERVER_PORT = '3000'
+  PGRST_DB_POOL_SIZE = '20'
+  PGRST_MAX_ROWS = '1000'
   POLL_INTERVAL_MS = '5000'
   BATCH_SIZE = '100'
   CHAIN_QUERY_URL = 'https://yaci-explorer-apis.fly.dev'
@@ -31,7 +33,7 @@ primary_region = 'sjc'
   force_https = true
   auto_stop_machines = 'stop'
   auto_start_machines = true
-  min_machines_running = 0
+  min_machines_running = 1
   processes = ['app']
 
 [[http_service.checks]]
@@ -42,7 +44,7 @@ primary_region = 'sjc'
   path = "/"
 
 [[vm]]
-  memory = '256mb'
+  memory = '512mb'
   cpu_kind = 'shared'
   cpus = 1
   processes = ['app']

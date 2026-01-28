@@ -11,12 +11,16 @@
  * - Jailed state changes
  * - Commission rate changes
  *
+ * Also refreshes analytics materialized views on a separate cadence
+ * (default: every 4 cycles = ~1 hour).
+ *
  * Runs on a configurable interval (default: 15 minutes).
  *
  * Environment:
  *   DATABASE_URL         - PostgreSQL connection string
  *   CHAIN_QUERY_URL      - chain-query-service base URL (default: http://localhost:3001)
  *   REFRESH_INTERVAL_MS  - Refresh interval in milliseconds (default: 900000 = 15 min)
+ *   MV_REFRESH_EVERY_N   - Refresh materialized views every N cycles (default: 4 = ~1 hour)
  */
 
 import pg from 'pg'
@@ -25,6 +29,7 @@ const { Pool } = pg
 const DATABASE_URL = process.env.DATABASE_URL || 'postgres://postgres:bOqwmcryOQcdmrO@localhost:15432/postgres?sslmode=disable'
 const CHAIN_QUERY_URL = process.env.CHAIN_QUERY_URL || 'https://yaci-explorer-apis.fly.dev'
 const REFRESH_INTERVAL_MS = parseInt(process.env.REFRESH_INTERVAL_MS || '900000', 10)
+const MV_REFRESH_EVERY_N = parseInt(process.env.MV_REFRESH_EVERY_N || '4', 10)
 
 /** Maps gRPC status enum to DB status string */
 function mapStatus(status: number | string): string {
@@ -195,6 +200,24 @@ async function refreshValidators(pool: pg.Pool): Promise<void> {
 	console.log(`[ValidatorRefresh] Done in ${elapsed}ms: ${updated} updated, ${errors} errors`)
 }
 
+/** Refreshes analytics materialized views concurrently */
+async function refreshMaterializedViews(pool: pg.Pool): Promise<void> {
+	const startTime = Date.now()
+	console.log(`[MVRefresh] Refreshing analytics views...`)
+
+	const client = await pool.connect()
+	try {
+		await client.query('REFRESH MATERIALIZED VIEW CONCURRENTLY api.mv_daily_tx_stats')
+		await client.query('REFRESH MATERIALIZED VIEW CONCURRENTLY api.mv_hourly_tx_stats')
+		await client.query('REFRESH MATERIALIZED VIEW CONCURRENTLY api.mv_message_type_stats')
+	} finally {
+		client.release()
+	}
+
+	const elapsed = Date.now() - startTime
+	console.log(`[MVRefresh] Done in ${elapsed}ms`)
+}
+
 /** Main loop */
 async function main() {
 	const pool = new Pool({ connectionString: DATABASE_URL })
@@ -202,6 +225,9 @@ async function main() {
 	console.log(`[ValidatorRefresh] Starting validator refresh service`)
 	console.log(`[ValidatorRefresh] Chain query URL: ${CHAIN_QUERY_URL}`)
 	console.log(`[ValidatorRefresh] Refresh interval: ${REFRESH_INTERVAL_MS}ms (${REFRESH_INTERVAL_MS / 60000} min)`)
+	console.log(`[MVRefresh] Materialized view refresh every ${MV_REFRESH_EVERY_N} cycles`)
+
+	let cycle = 0
 
 	// Run immediately on startup
 	try {
@@ -210,15 +236,29 @@ async function main() {
 		console.error(`[ValidatorRefresh] Initial refresh failed: ${err.message}`)
 	}
 
+	try {
+		await refreshMaterializedViews(pool)
+	} catch (err: any) {
+		console.error(`[MVRefresh] Initial refresh failed: ${err.message}`)
+	}
+
 	// Then run on interval
 	while (true) {
 		await new Promise(resolve => setTimeout(resolve, REFRESH_INTERVAL_MS))
+		cycle++
 
 		try {
 			await refreshValidators(pool)
 		} catch (err: any) {
 			console.error(`[ValidatorRefresh] Refresh failed: ${err.message}`)
-			// Continue looping, will retry next interval
+		}
+
+		if (cycle % MV_REFRESH_EVERY_N === 0) {
+			try {
+				await refreshMaterializedViews(pool)
+			} catch (err: any) {
+				console.error(`[MVRefresh] Refresh failed: ${err.message}`)
+			}
 		}
 	}
 }
