@@ -2,23 +2,29 @@
 /**
  * Chain Query Service
  *
- * HTTP proxy for direct chain gRPC queries.
- * Extensible design to add more query types as needed.
+ * HTTP proxy for chain queries via gRPC and REST API.
+ * Provides CORS-enabled endpoints for browser clients.
  *
- * Current endpoints:
+ * gRPC Query Endpoints:
  * - GET /chain/balances/:address - Get account balances
  * - GET /chain/spendable/:address - Get spendable balances
  * - GET /chain/supply/:denom - Get supply of a denom
  * - GET /chain/staking/validators - Get all validators
  * - GET /chain/staking/pool - Get staking pool info
  * - GET /chain/health - Health check
+ *
+ * REST API Proxy Endpoints (for Keplr transactions):
+ * - GET /cosmos/auth/v1beta1/accounts/:address - Get account info
+ * - POST /cosmos/tx/v1beta1/txs - Broadcast transaction
  */
 
 import * as http from 'http'
+import * as https from 'https'
 import * as grpc from '@grpc/grpc-js'
 import protobuf from 'protobufjs'
 
 const GRPC_ENDPOINT = process.env.CHAIN_GRPC_ENDPOINT || 'localhost:9090'
+const REST_ENDPOINT = process.env.CHAIN_REST_ENDPOINT || 'https://rest.republicai.io'
 const PORT = parseInt(process.env.CHAIN_QUERY_PORT || '3001', 10)
 // Default to TLS unless explicitly set to insecure
 const INSECURE = process.env.YACI_INSECURE === 'true'
@@ -626,6 +632,43 @@ async function readBody(req: http.IncomingMessage): Promise<string> {
 	})
 }
 
+// Helper to proxy requests to REST API
+async function proxyToRest(path: string, method: string, body?: string): Promise<{ status: number; data: any }> {
+	const url = new URL(path, REST_ENDPOINT)
+	const isHttps = url.protocol === 'https:'
+
+	return new Promise((resolve, reject) => {
+		const options = {
+			hostname: url.hostname,
+			port: url.port || (isHttps ? 443 : 80),
+			path: url.pathname + url.search,
+			method,
+			headers: {
+				'Content-Type': 'application/json',
+				'Accept': 'application/json',
+				...(body ? { 'Content-Length': Buffer.byteLength(body) } : {}),
+			},
+		}
+
+		const httpModule = isHttps ? https : http
+		const proxyReq = httpModule.request(options, (proxyRes) => {
+			let data = ''
+			proxyRes.on('data', (chunk) => { data += chunk.toString() })
+			proxyRes.on('end', () => {
+				try {
+					resolve({ status: proxyRes.statusCode || 500, data: JSON.parse(data) })
+				} catch {
+					resolve({ status: proxyRes.statusCode || 500, data: { raw: data } })
+				}
+			})
+		})
+
+		proxyReq.on('error', reject)
+		if (body) proxyReq.write(body)
+		proxyReq.end()
+	})
+}
+
 // HTTP server
 const server = http.createServer(async (req, res) => {
 	// CORS headers
@@ -645,11 +688,44 @@ const server = http.createServer(async (req, res) => {
 	// Health check
 	if (url.pathname === '/chain/health') {
 		res.writeHead(200)
-		res.end(JSON.stringify({ status: 'ok', endpoint: GRPC_ENDPOINT }))
+		res.end(JSON.stringify({ status: 'ok', endpoint: GRPC_ENDPOINT, restEndpoint: REST_ENDPOINT }))
 		return
 	}
 
-	// POST /chain/tx/broadcast - Broadcast signed transaction
+	// REST API Proxy routes for Keplr wallet transactions
+	// These proxy to the chain's REST API with CORS headers
+
+	// GET /cosmos/auth/v1beta1/accounts/:address - Get account info (sequence number)
+	const accountMatch = url.pathname.match(/^\/cosmos\/auth\/v1beta1\/accounts\/([a-zA-Z0-9]+)$/)
+	if (accountMatch && req.method === 'GET') {
+		try {
+			const result = await proxyToRest(url.pathname, 'GET')
+			res.writeHead(result.status)
+			res.end(JSON.stringify(result.data))
+		} catch (err: any) {
+			console.error(`[ChainQuery] REST proxy error:`, err.message)
+			res.writeHead(500)
+			res.end(JSON.stringify({ error: err.message }))
+		}
+		return
+	}
+
+	// POST /cosmos/tx/v1beta1/txs - Broadcast signed transaction
+	if (url.pathname === '/cosmos/tx/v1beta1/txs' && req.method === 'POST') {
+		try {
+			const body = await readBody(req)
+			const result = await proxyToRest(url.pathname, 'POST', body)
+			res.writeHead(result.status)
+			res.end(JSON.stringify(result.data))
+		} catch (err: any) {
+			console.error(`[ChainQuery] REST proxy error:`, err.message)
+			res.writeHead(500)
+			res.end(JSON.stringify({ error: err.message }))
+		}
+		return
+	}
+
+	// POST /chain/tx/broadcast - Broadcast signed transaction (gRPC version)
 	if (url.pathname === '/chain/tx/broadcast' && req.method === 'POST') {
 		try {
 			const body = await readBody(req)
@@ -705,14 +781,16 @@ const server = http.createServer(async (req, res) => {
 	// 404
 	res.writeHead(404)
 	res.end(JSON.stringify({ error: 'Not found', endpoints: [
-		'GET /chain/health',
-		'GET /chain/balances/:address',
-		'GET /chain/spendable/:address',
-		'GET /chain/supply/:denom',
-		'GET /chain/staking/validators?status=BOND_STATUS_BONDED',
-		'GET /chain/staking/pool',
-		'GET /chain/auth/account/:address',
+		'GET  /chain/health',
+		'GET  /chain/balances/:address',
+		'GET  /chain/spendable/:address',
+		'GET  /chain/supply/:denom',
+		'GET  /chain/staking/validators?status=BOND_STATUS_BONDED',
+		'GET  /chain/staking/pool',
+		'GET  /chain/auth/account/:address',
 		'POST /chain/tx/broadcast',
+		'GET  /cosmos/auth/v1beta1/accounts/:address (proxy)',
+		'POST /cosmos/tx/v1beta1/txs (proxy)',
 	]}))
 })
 
@@ -721,7 +799,8 @@ initClient()
 server.listen(PORT, () => {
 	console.log(`[ChainQuery] Running on port ${PORT}`)
 	console.log(`[ChainQuery] gRPC endpoint: ${GRPC_ENDPOINT}`)
-	console.log(`[ChainQuery] Endpoints:`)
+	console.log(`[ChainQuery] REST endpoint: ${REST_ENDPOINT}`)
+	console.log(`[ChainQuery] gRPC Endpoints:`)
 	console.log(`  GET  /chain/health`)
 	console.log(`  GET  /chain/balances/:address`)
 	console.log(`  GET  /chain/spendable/:address`)
@@ -730,4 +809,7 @@ server.listen(PORT, () => {
 	console.log(`  GET  /chain/staking/pool`)
 	console.log(`  GET  /chain/auth/account/:address`)
 	console.log(`  POST /chain/tx/broadcast`)
+	console.log(`[ChainQuery] REST Proxy Endpoints:`)
+	console.log(`  GET  /cosmos/auth/v1beta1/accounts/:address`)
+	console.log(`  POST /cosmos/tx/v1beta1/txs`)
 })
