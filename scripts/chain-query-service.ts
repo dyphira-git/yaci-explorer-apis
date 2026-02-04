@@ -2,29 +2,25 @@
 /**
  * Chain Query Service
  *
- * HTTP proxy for chain queries via gRPC and REST API.
+ * HTTP proxy for chain queries via gRPC.
  * Provides CORS-enabled endpoints for browser clients.
  *
- * gRPC Query Endpoints:
+ * Endpoints:
  * - GET /chain/balances/:address - Get account balances
  * - GET /chain/spendable/:address - Get spendable balances
  * - GET /chain/supply/:denom - Get supply of a denom
  * - GET /chain/staking/validators - Get all validators
  * - GET /chain/staking/pool - Get staking pool info
+ * - GET /chain/auth/account/:address - Get account info (for signing)
+ * - POST /chain/tx/broadcast - Broadcast signed transaction
  * - GET /chain/health - Health check
- *
- * REST API Proxy Endpoints (for Keplr transactions):
- * - GET /cosmos/auth/v1beta1/accounts/:address - Get account info
- * - POST /cosmos/tx/v1beta1/txs - Broadcast transaction
  */
 
 import * as http from 'http'
-import * as https from 'https'
 import * as grpc from '@grpc/grpc-js'
-import protobuf from 'protobufjs'
+import * as protobuf from 'protobufjs'
 
 const GRPC_ENDPOINT = process.env.CHAIN_GRPC_ENDPOINT || 'localhost:9090'
-const REST_ENDPOINT = process.env.CHAIN_REST_ENDPOINT || 'https://rest.republicai.io'
 const PORT = parseInt(process.env.CHAIN_QUERY_PORT || '3001', 10)
 // Default to TLS unless explicitly set to insecure
 const INSECURE = process.env.YACI_INSECURE === 'true'
@@ -50,6 +46,20 @@ const PROTOS = {
 		message Any {
 			string type_url = 1;
 			bytes value = 2;
+		}
+
+		// BaseAccount for decoding
+		message BaseAccount {
+			string address = 1;
+			Any pub_key = 2;
+			uint64 account_number = 3;
+			uint64 sequence = 4;
+		}
+
+		// EthAccount wraps BaseAccount (used by EVM chains like Republic)
+		message EthAccount {
+			BaseAccount base_account = 1;
+			bytes code_hash = 2;
 		}
 	`,
 	tx: `
@@ -115,6 +125,63 @@ const PROTOS = {
 		message Any {
 			string type_url = 1;
 			bytes value = 2;
+		}
+
+		// Transaction encoding types
+		message TxRaw {
+			bytes body_bytes = 1;
+			bytes auth_info_bytes = 2;
+			repeated bytes signatures = 3;
+		}
+
+		message TxBody {
+			repeated Any messages = 1;
+			string memo = 2;
+			uint64 timeout_height = 3;
+			repeated Any extension_options = 1023;
+			repeated Any non_critical_extension_options = 2047;
+		}
+
+		message AuthInfo {
+			repeated SignerInfo signer_infos = 1;
+			Fee fee = 2;
+		}
+
+		message SignerInfo {
+			Any public_key = 1;
+			ModeInfo mode_info = 2;
+			uint64 sequence = 3;
+		}
+
+		message ModeInfo {
+			oneof sum {
+				Single single = 1;
+				Multi multi = 2;
+			}
+			message Single {
+				int32 mode = 1;
+			}
+			message Multi {
+				CompactBitArray bitarray = 1;
+				repeated ModeInfo mode_infos = 2;
+			}
+		}
+
+		message CompactBitArray {
+			uint32 extra_bits_stored = 1;
+			bytes elems = 2;
+		}
+
+		message Fee {
+			repeated Coin amount = 1;
+			uint64 gas_limit = 2;
+			string payer = 3;
+			string granter = 4;
+		}
+
+		message Coin {
+			string denom = 1;
+			string amount = 2;
 		}
 	`,
 	bank: `
@@ -274,7 +341,7 @@ const PROTOS = {
 class ChainQueryClient {
 	private endpoint: string
 	private credentials: grpc.ChannelCredentials
-	private roots: Map<string, protobuf.Root> = new Map()
+	public roots: Map<string, protobuf.Root> = new Map()
 	private stubs: Map<string, any> = new Map()
 
 	constructor(endpoint: string, insecure: boolean) {
@@ -496,6 +563,9 @@ class ChainQueryClient {
 
 	/** Fetches account info (account number, sequence) for signing transactions */
 	async getAccount(address: string): Promise<any> {
+		const root = this.roots.get('auth')
+		if (!root) throw new Error('Auth proto not loaded')
+
 		const stub = this.getStub('cosmos.auth.v1beta1.Query', {
 			Account: {
 				path: '/cosmos.auth.v1beta1.Query/Account',
@@ -511,8 +581,8 @@ class ChainQueryClient {
 					if (err.message?.includes('NotFound') || err.message?.includes('not found')) {
 						resolve({
 							account: null,
-							accountNumber: 0,
-							sequence: 0,
+							account_number: '0',
+							sequence: '0',
 						})
 						return
 					}
@@ -520,23 +590,58 @@ class ChainQueryClient {
 					return
 				}
 
-				// The account comes as Any type with encoded value
-				// For EthAccount, the structure is different from BaseAccount
 				const account = response.account
-				if (!account) {
-					resolve({ account: null, accountNumber: 0, sequence: 0 })
+				if (!account || !account.value) {
+					resolve({ account: null, account_number: '0', sequence: '0' })
 					return
 				}
 
-				// Return raw account data - let the client parse it
-				// We return the type_url so client knows how to decode
-				resolve({
-					account: {
-						type_url: account.type_url || account.typeUrl || '',
-						// Value is bytes - encode as base64 for JSON transport
-						value: account.value ? Buffer.from(account.value).toString('base64') : null,
-					},
-				})
+				try {
+					const typeUrl = account.type_url || account.typeUrl || ''
+					let accountNumber = '0'
+					let sequence = '0'
+
+					// Decode based on account type
+					if (typeUrl.includes('EthAccount')) {
+						// Decode EthAccount which wraps BaseAccount
+						const EthAccount = root.lookupType('cosmos.auth.v1beta1.EthAccount')
+						const decoded = EthAccount.decode(account.value)
+						const baseAccount = (decoded as any).base_account || (decoded as any).baseAccount
+						if (baseAccount) {
+							accountNumber = String(baseAccount.account_number || baseAccount.accountNumber || 0)
+							sequence = String(baseAccount.sequence || 0)
+						}
+					} else {
+						// Decode BaseAccount directly
+						const BaseAccount = root.lookupType('cosmos.auth.v1beta1.BaseAccount')
+						const decoded = BaseAccount.decode(account.value)
+						accountNumber = String((decoded as any).account_number || (decoded as any).accountNumber || 0)
+						sequence = String((decoded as any).sequence || 0)
+					}
+
+					// Return in REST API compatible format
+					resolve({
+						account: {
+							'@type': typeUrl,
+							base_account: {
+								address,
+								account_number: accountNumber,
+								sequence: sequence,
+							},
+						},
+					})
+				} catch (decodeErr: any) {
+					console.error('[ChainQuery] Failed to decode account:', decodeErr.message)
+					// Return raw data if decode fails
+					resolve({
+						account: {
+							'@type': account.type_url || account.typeUrl || '',
+							raw_value: Buffer.from(account.value).toString('base64'),
+						},
+						account_number: '0',
+						sequence: '0',
+					})
+				}
 			})
 		})
 	}
@@ -632,43 +737,6 @@ async function readBody(req: http.IncomingMessage): Promise<string> {
 	})
 }
 
-// Helper to proxy requests to REST API
-async function proxyToRest(path: string, method: string, body?: string): Promise<{ status: number; data: any }> {
-	const url = new URL(path, REST_ENDPOINT)
-	const isHttps = url.protocol === 'https:'
-
-	return new Promise((resolve, reject) => {
-		const options = {
-			hostname: url.hostname,
-			port: url.port || (isHttps ? 443 : 80),
-			path: url.pathname + url.search,
-			method,
-			headers: {
-				'Content-Type': 'application/json',
-				'Accept': 'application/json',
-				...(body ? { 'Content-Length': Buffer.byteLength(body) } : {}),
-			},
-		}
-
-		const httpModule = isHttps ? https : http
-		const proxyReq = httpModule.request(options, (proxyRes) => {
-			let data = ''
-			proxyRes.on('data', (chunk) => { data += chunk.toString() })
-			proxyRes.on('end', () => {
-				try {
-					resolve({ status: proxyRes.statusCode || 500, data: JSON.parse(data) })
-				} catch {
-					resolve({ status: proxyRes.statusCode || 500, data: { raw: data } })
-				}
-			})
-		})
-
-		proxyReq.on('error', reject)
-		if (body) proxyReq.write(body)
-		proxyReq.end()
-	})
-}
-
 // HTTP server
 const server = http.createServer(async (req, res) => {
 	// CORS headers
@@ -688,59 +756,117 @@ const server = http.createServer(async (req, res) => {
 	// Health check
 	if (url.pathname === '/chain/health') {
 		res.writeHead(200)
-		res.end(JSON.stringify({ status: 'ok', endpoint: GRPC_ENDPOINT, restEndpoint: REST_ENDPOINT }))
+		res.end(JSON.stringify({ status: 'ok', endpoint: GRPC_ENDPOINT }))
 		return
 	}
 
-	// REST API Proxy routes for Keplr wallet transactions
-	// These proxy to the chain's REST API with CORS headers
-
-	// GET /cosmos/auth/v1beta1/accounts/:address - Get account info (sequence number)
-	const accountMatch = url.pathname.match(/^\/cosmos\/auth\/v1beta1\/accounts\/([a-zA-Z0-9]+)$/)
-	if (accountMatch && req.method === 'GET') {
-		try {
-			const result = await proxyToRest(url.pathname, 'GET')
-			res.writeHead(result.status)
-			res.end(JSON.stringify(result.data))
-		} catch (err: any) {
-			console.error(`[ChainQuery] REST proxy error:`, err.message)
-			res.writeHead(500)
-			res.end(JSON.stringify({ error: err.message }))
-		}
-		return
-	}
-
-	// POST /cosmos/tx/v1beta1/txs - Broadcast signed transaction
-	if (url.pathname === '/cosmos/tx/v1beta1/txs' && req.method === 'POST') {
-		try {
-			const body = await readBody(req)
-			const result = await proxyToRest(url.pathname, 'POST', body)
-			res.writeHead(result.status)
-			res.end(JSON.stringify(result.data))
-		} catch (err: any) {
-			console.error(`[ChainQuery] REST proxy error:`, err.message)
-			res.writeHead(500)
-			res.end(JSON.stringify({ error: err.message }))
-		}
-		return
-	}
-
-	// POST /chain/tx/broadcast - Broadcast signed transaction (gRPC version)
+	// POST /chain/tx/broadcast - Broadcast signed transaction via gRPC
+	// Accepts either:
+	// 1. { tx_bytes: "base64..." } - Raw protobuf-encoded tx
+	// 2. { tx: { body, auth_info, signatures }, mode: "BROADCAST_MODE_SYNC" } - JSON tx (REST API format)
 	if (url.pathname === '/chain/tx/broadcast' && req.method === 'POST') {
 		try {
 			const body = await readBody(req)
 			const data = JSON.parse(body)
 
-			// Expect tx_bytes as base64 encoded string
-			if (!data.tx_bytes) {
+			let txBytes: Buffer
+			let mode = 2 // Default BROADCAST_MODE_SYNC
+
+			if (data.tx_bytes) {
+				// Direct protobuf bytes (base64 encoded)
+				txBytes = Buffer.from(data.tx_bytes, 'base64')
+				mode = data.mode || 2
+			} else if (data.tx) {
+				// JSON tx format - encode to protobuf
+				const txRoot = client.roots.get('tx')
+				if (!txRoot) throw new Error('TX proto not loaded')
+
+				const tx = data.tx
+
+				// Encode TxBody
+				const TxBody = txRoot.lookupType('cosmos.tx.v1beta1.TxBody')
+				const Any = txRoot.lookupType('cosmos.tx.v1beta1.Any')
+
+				const messages = (tx.body?.messages || []).map((msg: any) => {
+					const typeUrl = msg['@type'] || ''
+					// For amino-signed txs, we encode the message as JSON bytes
+					const msgCopy = { ...msg }
+					delete msgCopy['@type']
+					const valueBytes = Buffer.from(JSON.stringify(msgCopy), 'utf8')
+					return Any.create({ type_url: typeUrl, value: valueBytes })
+				})
+
+				const txBodyObj = TxBody.create({
+					messages,
+					memo: tx.body?.memo || '',
+					timeout_height: 0,
+				})
+				const bodyBytes = TxBody.encode(txBodyObj).finish()
+
+				// Encode AuthInfo
+				const AuthInfo = txRoot.lookupType('cosmos.tx.v1beta1.AuthInfo')
+				const SignerInfo = txRoot.lookupType('cosmos.tx.v1beta1.SignerInfo')
+				const ModeInfo = txRoot.lookupType('cosmos.tx.v1beta1.ModeInfo')
+				const Fee = txRoot.lookupType('cosmos.tx.v1beta1.Fee')
+				const Coin = txRoot.lookupType('cosmos.tx.v1beta1.Coin')
+
+				const signerInfos = (tx.auth_info?.signer_infos || []).map((si: any) => {
+					const pubKey = si.public_key
+					const pubKeyAny = Any.create({
+						type_url: pubKey?.['@type'] || '',
+						value: pubKey?.key ? Buffer.from(pubKey.key, 'base64') : Buffer.alloc(0),
+					})
+
+					// SIGN_MODE_LEGACY_AMINO_JSON = 127
+					const modeInfo = ModeInfo.create({
+						single: { mode: 127 }
+					})
+
+					return SignerInfo.create({
+						public_key: pubKeyAny,
+						mode_info: modeInfo,
+						sequence: parseInt(si.sequence || '0', 10),
+					})
+				})
+
+				const feeAmounts = (tx.auth_info?.fee?.amount || []).map((c: any) =>
+					Coin.create({ denom: c.denom, amount: c.amount })
+				)
+
+				const fee = Fee.create({
+					amount: feeAmounts,
+					gas_limit: parseInt(tx.auth_info?.fee?.gas || '0', 10),
+				})
+
+				const authInfoObj = AuthInfo.create({
+					signer_infos: signerInfos,
+					fee,
+				})
+				const authInfoBytes = AuthInfo.encode(authInfoObj).finish()
+
+				// Encode TxRaw
+				const TxRaw = txRoot.lookupType('cosmos.tx.v1beta1.TxRaw')
+				const signatures = (tx.signatures || []).map((sig: string) =>
+					Buffer.from(sig, 'base64')
+				)
+
+				const txRawObj = TxRaw.create({
+					body_bytes: bodyBytes,
+					auth_info_bytes: authInfoBytes,
+					signatures,
+				})
+				txBytes = Buffer.from(TxRaw.encode(txRawObj).finish())
+
+				// Parse mode string
+				const modeStr = data.mode || 'BROADCAST_MODE_SYNC'
+				if (modeStr === 'BROADCAST_MODE_BLOCK') mode = 1
+				else if (modeStr === 'BROADCAST_MODE_SYNC') mode = 2
+				else if (modeStr === 'BROADCAST_MODE_ASYNC') mode = 3
+			} else {
 				res.writeHead(400)
-				res.end(JSON.stringify({ error: 'Missing tx_bytes in request body' }))
+				res.end(JSON.stringify({ error: 'Missing tx_bytes or tx in request body' }))
 				return
 			}
-
-			const txBytes = Buffer.from(data.tx_bytes, 'base64')
-			// mode: 1 = BROADCAST_MODE_BLOCK, 2 = BROADCAST_MODE_SYNC, 3 = BROADCAST_MODE_ASYNC
-			const mode = data.mode || 2
 
 			const result = await client.broadcastTx(txBytes, mode)
 			res.writeHead(200)
@@ -789,8 +915,6 @@ const server = http.createServer(async (req, res) => {
 		'GET  /chain/staking/pool',
 		'GET  /chain/auth/account/:address',
 		'POST /chain/tx/broadcast',
-		'GET  /cosmos/auth/v1beta1/accounts/:address (proxy)',
-		'POST /cosmos/tx/v1beta1/txs (proxy)',
 	]}))
 })
 
@@ -799,8 +923,7 @@ initClient()
 server.listen(PORT, () => {
 	console.log(`[ChainQuery] Running on port ${PORT}`)
 	console.log(`[ChainQuery] gRPC endpoint: ${GRPC_ENDPOINT}`)
-	console.log(`[ChainQuery] REST endpoint: ${REST_ENDPOINT}`)
-	console.log(`[ChainQuery] gRPC Endpoints:`)
+	console.log(`[ChainQuery] Endpoints:`)
 	console.log(`  GET  /chain/health`)
 	console.log(`  GET  /chain/balances/:address`)
 	console.log(`  GET  /chain/spendable/:address`)
@@ -809,7 +932,4 @@ server.listen(PORT, () => {
 	console.log(`  GET  /chain/staking/pool`)
 	console.log(`  GET  /chain/auth/account/:address`)
 	console.log(`  POST /chain/tx/broadcast`)
-	console.log(`[ChainQuery] REST Proxy Endpoints:`)
-	console.log(`  GET  /cosmos/auth/v1beta1/accounts/:address`)
-	console.log(`  POST /cosmos/tx/v1beta1/txs`)
 })
