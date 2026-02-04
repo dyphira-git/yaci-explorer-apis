@@ -142,6 +142,9 @@ $$ LANGUAGE plpgsql;
 -- Can be called manually: SELECT api.backfill_jailing_events();
 -- ============================================================================
 
+-- Drop the old function first (can't change return type with CREATE OR REPLACE)
+DROP FUNCTION IF EXISTS api.backfill_jailing_events();
+
 CREATE OR REPLACE FUNCTION api.backfill_jailing_events()
 RETURNS TABLE(events_found INT, addresses_mapped INT) AS $$
 DECLARE
