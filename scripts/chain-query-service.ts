@@ -25,6 +25,92 @@ const INSECURE = process.env.YACI_INSECURE === 'true'
 
 // Proto definitions for chain queries
 const PROTOS = {
+	auth: `
+		syntax = "proto3";
+		package cosmos.auth.v1beta1;
+
+		service Query {
+			rpc Account(QueryAccountRequest) returns (QueryAccountResponse);
+		}
+
+		message QueryAccountRequest {
+			string address = 1;
+		}
+
+		message QueryAccountResponse {
+			Any account = 1;
+		}
+
+		message Any {
+			string type_url = 1;
+			bytes value = 2;
+		}
+	`,
+	tx: `
+		syntax = "proto3";
+		package cosmos.tx.v1beta1;
+
+		service Service {
+			rpc BroadcastTx(BroadcastTxRequest) returns (BroadcastTxResponse);
+		}
+
+		message BroadcastTxRequest {
+			bytes tx_bytes = 1;
+			int32 mode = 2;
+		}
+
+		message BroadcastTxResponse {
+			TxResponse tx_response = 1;
+		}
+
+		message TxResponse {
+			int64 height = 1;
+			string txhash = 2;
+			string codespace = 3;
+			uint32 code = 4;
+			string data = 5;
+			string raw_log = 6;
+			repeated AbciMessageLog logs = 7;
+			string info = 8;
+			int64 gas_wanted = 9;
+			int64 gas_used = 10;
+			Any tx = 11;
+			string timestamp = 12;
+			repeated Event events = 13;
+		}
+
+		message AbciMessageLog {
+			uint32 msg_index = 1;
+			string log = 2;
+			repeated StringEvent events = 3;
+		}
+
+		message StringEvent {
+			string type = 1;
+			repeated Attribute attributes = 2;
+		}
+
+		message Attribute {
+			string key = 1;
+			string value = 2;
+		}
+
+		message Event {
+			string type = 1;
+			repeated EventAttribute attributes = 2;
+		}
+
+		message EventAttribute {
+			bytes key = 1;
+			bytes value = 2;
+			bool index = 3;
+		}
+
+		message Any {
+			string type_url = 1;
+			bytes value = 2;
+		}
+	`,
 	bank: `
 		syntax = "proto3";
 		package cosmos.bank.v1beta1;
@@ -399,6 +485,92 @@ class ChainQueryClient {
 			})
 		})
 	}
+
+	// Auth queries
+
+	/** Fetches account info (account number, sequence) for signing transactions */
+	async getAccount(address: string): Promise<any> {
+		const stub = this.getStub('cosmos.auth.v1beta1.Query', {
+			Account: {
+				path: '/cosmos.auth.v1beta1.Query/Account',
+				requestType: 'cosmos.auth.v1beta1.QueryAccountRequest',
+				responseType: 'cosmos.auth.v1beta1.QueryAccountResponse',
+			},
+		})
+
+		return new Promise((resolve, reject) => {
+			stub.Account({ address }, (err: Error | null, response: any) => {
+				if (err) {
+					// Check if account not found (new account)
+					if (err.message?.includes('NotFound') || err.message?.includes('not found')) {
+						resolve({
+							account: null,
+							accountNumber: 0,
+							sequence: 0,
+						})
+						return
+					}
+					reject(err)
+					return
+				}
+
+				// The account comes as Any type with encoded value
+				// For EthAccount, the structure is different from BaseAccount
+				const account = response.account
+				if (!account) {
+					resolve({ account: null, accountNumber: 0, sequence: 0 })
+					return
+				}
+
+				// Return raw account data - let the client parse it
+				// We return the type_url so client knows how to decode
+				resolve({
+					account: {
+						type_url: account.type_url || account.typeUrl || '',
+						// Value is bytes - encode as base64 for JSON transport
+						value: account.value ? Buffer.from(account.value).toString('base64') : null,
+					},
+				})
+			})
+		})
+	}
+
+	// Transaction broadcast
+
+	/** Broadcasts a signed transaction to the chain */
+	async broadcastTx(txBytes: Buffer, mode: number = 2): Promise<any> {
+		const stub = this.getStub('cosmos.tx.v1beta1.Service', {
+			BroadcastTx: {
+				path: '/cosmos.tx.v1beta1.Service/BroadcastTx',
+				requestType: 'cosmos.tx.v1beta1.BroadcastTxRequest',
+				responseType: 'cosmos.tx.v1beta1.BroadcastTxResponse',
+			},
+		})
+
+		return new Promise((resolve, reject) => {
+			stub.BroadcastTx({ tx_bytes: txBytes, mode }, (err: Error | null, response: any) => {
+				if (err) {
+					reject(err)
+					return
+				}
+
+				const txResponse = response.tx_response || response.txResponse || {}
+				resolve({
+					tx_response: {
+						height: txResponse.height?.toString() || '0',
+						txhash: txResponse.txhash || txResponse.txHash || '',
+						codespace: txResponse.codespace || '',
+						code: txResponse.code || 0,
+						data: txResponse.data || '',
+						raw_log: txResponse.raw_log || txResponse.rawLog || '',
+						info: txResponse.info || '',
+						gas_wanted: txResponse.gas_wanted?.toString() || txResponse.gasWanted?.toString() || '0',
+						gas_used: txResponse.gas_used?.toString() || txResponse.gasUsed?.toString() || '0',
+					},
+				})
+			})
+		})
+	}
 }
 
 // Initialize client
@@ -437,13 +609,28 @@ const routes: Array<{ pattern: RegExp; handler: RouteHandler }> = [
 		pattern: /^\/chain\/staking\/pool$/,
 		handler: async () => client.getStakingPool(),
 	},
+	// GET /chain/auth/account/:address - Get account info for signing
+	{
+		pattern: /^\/chain\/auth\/account\/([a-zA-Z0-9]+)$/,
+		handler: async (params) => client.getAccount(params.address),
+	},
 ]
+
+// Helper to read request body
+async function readBody(req: http.IncomingMessage): Promise<string> {
+	return new Promise((resolve, reject) => {
+		let body = ''
+		req.on('data', (chunk) => { body += chunk.toString() })
+		req.on('end', () => resolve(body))
+		req.on('error', reject)
+	})
+}
 
 // HTTP server
 const server = http.createServer(async (req, res) => {
 	// CORS headers
 	res.setHeader('Access-Control-Allow-Origin', '*')
-	res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS')
+	res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
 	res.setHeader('Access-Control-Allow-Headers', 'Content-Type')
 	res.setHeader('Content-Type', 'application/json')
 
@@ -462,7 +649,35 @@ const server = http.createServer(async (req, res) => {
 		return
 	}
 
-	// Match routes
+	// POST /chain/tx/broadcast - Broadcast signed transaction
+	if (url.pathname === '/chain/tx/broadcast' && req.method === 'POST') {
+		try {
+			const body = await readBody(req)
+			const data = JSON.parse(body)
+
+			// Expect tx_bytes as base64 encoded string
+			if (!data.tx_bytes) {
+				res.writeHead(400)
+				res.end(JSON.stringify({ error: 'Missing tx_bytes in request body' }))
+				return
+			}
+
+			const txBytes = Buffer.from(data.tx_bytes, 'base64')
+			// mode: 1 = BROADCAST_MODE_BLOCK, 2 = BROADCAST_MODE_SYNC, 3 = BROADCAST_MODE_ASYNC
+			const mode = data.mode || 2
+
+			const result = await client.broadcastTx(txBytes, mode)
+			res.writeHead(200)
+			res.end(JSON.stringify(result))
+		} catch (err: any) {
+			console.error(`[ChainQuery] Broadcast error:`, err.message)
+			res.writeHead(500)
+			res.end(JSON.stringify({ error: err.message }))
+		}
+		return
+	}
+
+	// Match GET routes
 	for (const route of routes) {
 		const match = url.pathname.match(route.pattern)
 		if (match && req.method === 'GET') {
@@ -472,6 +687,7 @@ const server = http.createServer(async (req, res) => {
 			if (url.pathname.includes('/balances/')) params.address = match[1]
 			else if (url.pathname.includes('/spendable/')) params.address = match[1]
 			else if (url.pathname.includes('/supply/')) params.denom = match[1]
+			else if (url.pathname.includes('/auth/account/')) params.address = match[1]
 
 			try {
 				const result = await route.handler(params, url.searchParams)
@@ -495,6 +711,8 @@ const server = http.createServer(async (req, res) => {
 		'GET /chain/supply/:denom',
 		'GET /chain/staking/validators?status=BOND_STATUS_BONDED',
 		'GET /chain/staking/pool',
+		'GET /chain/auth/account/:address',
+		'POST /chain/tx/broadcast',
 	]}))
 })
 
@@ -504,10 +722,12 @@ server.listen(PORT, () => {
 	console.log(`[ChainQuery] Running on port ${PORT}`)
 	console.log(`[ChainQuery] gRPC endpoint: ${GRPC_ENDPOINT}`)
 	console.log(`[ChainQuery] Endpoints:`)
-	console.log(`  GET /chain/health`)
-	console.log(`  GET /chain/balances/:address`)
-	console.log(`  GET /chain/spendable/:address`)
-	console.log(`  GET /chain/supply/:denom`)
-	console.log(`  GET /chain/staking/validators`)
-	console.log(`  GET /chain/staking/pool`)
+	console.log(`  GET  /chain/health`)
+	console.log(`  GET  /chain/balances/:address`)
+	console.log(`  GET  /chain/spendable/:address`)
+	console.log(`  GET  /chain/supply/:denom`)
+	console.log(`  GET  /chain/staking/validators`)
+	console.log(`  GET  /chain/staking/pool`)
+	console.log(`  GET  /chain/auth/account/:address`)
+	console.log(`  POST /chain/tx/broadcast`)
 })
