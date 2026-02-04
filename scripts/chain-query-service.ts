@@ -6,22 +6,103 @@
  * Extensible design to add more query types as needed.
  *
  * Current endpoints:
- * - GET /chain/balances/:address - Get account balances
- * - GET /chain/spendable/:address - Get spendable balances
+ * - GET /chain/balances/:address - Get account balances (auto-converts valoper addresses)
+ * - GET /chain/spendable/:address - Get spendable balances (auto-converts valoper addresses)
  * - GET /chain/supply/:denom - Get supply of a denom
  * - GET /chain/staking/validators - Get all validators
  * - GET /chain/staking/pool - Get staking pool info
+ * - GET /chain/params - Get detected chain parameters
  * - GET /chain/health - Health check
  */
 
 import * as http from 'http'
 import * as grpc from '@grpc/grpc-js'
 import protobuf from 'protobufjs'
+import { bech32 } from 'bech32'
 
 const GRPC_ENDPOINT = process.env.CHAIN_GRPC_ENDPOINT || 'localhost:9090'
 const PORT = parseInt(process.env.CHAIN_QUERY_PORT || '3001', 10)
 // Default to TLS unless explicitly set to insecure
 const INSECURE = process.env.YACI_INSECURE === 'true'
+
+/** Chain's bech32 prefixes - auto-detected on startup */
+let chainPrefixes: {
+	account: string | null
+	valoper: string | null
+	valcons: string | null
+} = { account: null, valoper: null, valcons: null }
+
+/**
+ * Extract bech32 prefix from an address (everything before '1')
+ */
+function extractPrefix(address: string): string | null {
+	const idx = address.lastIndexOf('1')
+	if (idx <= 0) return null
+	return address.slice(0, idx)
+}
+
+/**
+ * Convert a bech32 address to a different prefix
+ */
+function convertAddress(address: string, targetPrefix: string): string {
+	const decoded = bech32.decode(address)
+	return bech32.encode(targetPrefix, decoded.words)
+}
+
+/**
+ * Normalize an address to account format if it's a known variant (valoper, valcons)
+ * Returns the original if prefix is unknown or already account format
+ */
+function toAccountAddress(address: string): { address: string; converted: boolean; error?: string } {
+	const prefix = extractPrefix(address)
+	if (!prefix) {
+		return { address, converted: false, error: 'Invalid bech32 address format' }
+	}
+
+	// Already in account format
+	if (prefix === chainPrefixes.account) {
+		return { address, converted: false }
+	}
+
+	// Convert from valoper or valcons to account
+	if (chainPrefixes.account && (prefix === chainPrefixes.valoper || prefix === chainPrefixes.valcons)) {
+		try {
+			const converted = convertAddress(address, chainPrefixes.account)
+			console.log(`[ChainQuery] Converted ${prefix} -> ${chainPrefixes.account}: ${address} -> ${converted}`)
+			return { address: converted, converted: true }
+		} catch (err: any) {
+			return { address, converted: false, error: `Failed to convert address: ${err.message}` }
+		}
+	}
+
+	// Unknown prefix - might be from a different chain
+	if (chainPrefixes.account) {
+		return {
+			address,
+			converted: false,
+			error: `Unknown address prefix '${prefix}'. This chain uses '${chainPrefixes.account}' for accounts. This may be an address from a different chain.`
+		}
+	}
+
+	// Chain prefix not yet detected, pass through
+	return { address, converted: false }
+}
+
+/**
+ * Detect chain prefixes from a validator's operator address
+ */
+function detectPrefixesFromValidator(operatorAddress: string): void {
+	const prefix = extractPrefix(operatorAddress)
+	if (!prefix) return
+
+	// Validator operator addresses end with 'valoper'
+	if (prefix.endsWith('valoper')) {
+		chainPrefixes.valoper = prefix
+		chainPrefixes.account = prefix.slice(0, -6) // Remove 'valoper'
+		chainPrefixes.valcons = chainPrefixes.account + 'valcons'
+		console.log(`[ChainQuery] Detected chain prefixes: account=${chainPrefixes.account}, valoper=${chainPrefixes.valoper}, valcons=${chainPrefixes.valcons}`)
+	}
+}
 
 // Proto definitions for chain queries
 const PROTOS = {
@@ -374,6 +455,12 @@ class ChainQueryClient {
 						minSelfDelegation: v.minSelfDelegation || v.min_self_delegation || '0',
 						unbondingHeight: v.unbondingHeight || v.unbonding_height || '0',
 					}))
+
+					// Auto-detect chain prefixes from first validator
+					if (validators.length > 0 && !chainPrefixes.account) {
+						detectPrefixesFromValidator(validators[0].operatorAddress)
+					}
+
 					resolve({ validators })
 				}
 			)
@@ -404,23 +491,56 @@ class ChainQueryClient {
 // Initialize client
 let client: ChainQueryClient
 
-function initClient() {
+async function initClient() {
 	client = new ChainQueryClient(GRPC_ENDPOINT, INSECURE)
+
+	// Detect chain prefixes by fetching one validator
+	try {
+		console.log('[ChainQuery] Detecting chain bech32 prefixes...')
+		await client.getValidators()
+		if (chainPrefixes.account) {
+			console.log(`[ChainQuery] Chain prefix detection complete`)
+		} else {
+			console.log('[ChainQuery] Warning: Could not detect chain prefixes (no validators found)')
+		}
+	} catch (err: any) {
+		console.error(`[ChainQuery] Warning: Failed to detect chain prefixes: ${err.message}`)
+	}
 }
 
 // Route handlers
 type RouteHandler = (params: Record<string, string>, query: URLSearchParams) => Promise<any>
 
 const routes: Array<{ pattern: RegExp; handler: RouteHandler }> = [
-	// GET /chain/balances/:address
+	// GET /chain/balances/:address - auto-converts valoper/valcons to account address
 	{
 		pattern: /^\/chain\/balances\/([a-zA-Z0-9]+)$/,
-		handler: async (params) => client.getAllBalances(params.address),
+		handler: async (params) => {
+			const result = toAccountAddress(params.address)
+			if (result.error) {
+				throw new Error(result.error)
+			}
+			const balances = await client.getAllBalances(result.address)
+			return {
+				...balances,
+				_meta: result.converted ? { originalAddress: params.address, convertedTo: result.address } : undefined,
+			}
+		},
 	},
-	// GET /chain/spendable/:address
+	// GET /chain/spendable/:address - auto-converts valoper/valcons to account address
 	{
 		pattern: /^\/chain\/spendable\/([a-zA-Z0-9]+)$/,
-		handler: async (params) => client.getSpendableBalances(params.address),
+		handler: async (params) => {
+			const result = toAccountAddress(params.address)
+			if (result.error) {
+				throw new Error(result.error)
+			}
+			const balances = await client.getSpendableBalances(result.address)
+			return {
+				...balances,
+				_meta: result.converted ? { originalAddress: params.address, convertedTo: result.address } : undefined,
+			}
+		},
 	},
 	// GET /chain/supply/:denom
 	{
@@ -436,6 +556,14 @@ const routes: Array<{ pattern: RegExp; handler: RouteHandler }> = [
 	{
 		pattern: /^\/chain\/staking\/pool$/,
 		handler: async () => client.getStakingPool(),
+	},
+	// GET /chain/params - returns detected chain parameters
+	{
+		pattern: /^\/chain\/params$/,
+		handler: async () => ({
+			bech32Prefixes: chainPrefixes,
+			grpcEndpoint: GRPC_ENDPOINT,
+		}),
 	},
 ]
 
@@ -458,7 +586,11 @@ const server = http.createServer(async (req, res) => {
 	// Health check
 	if (url.pathname === '/chain/health') {
 		res.writeHead(200)
-		res.end(JSON.stringify({ status: 'ok', endpoint: GRPC_ENDPOINT }))
+		res.end(JSON.stringify({
+			status: 'ok',
+			endpoint: GRPC_ENDPOINT,
+			bech32Prefixes: chainPrefixes,
+		}))
 		return
 	}
 
@@ -490,8 +622,9 @@ const server = http.createServer(async (req, res) => {
 	res.writeHead(404)
 	res.end(JSON.stringify({ error: 'Not found', endpoints: [
 		'GET /chain/health',
-		'GET /chain/balances/:address',
-		'GET /chain/spendable/:address',
+		'GET /chain/params',
+		'GET /chain/balances/:address (auto-converts valoper/valcons)',
+		'GET /chain/spendable/:address (auto-converts valoper/valcons)',
 		'GET /chain/supply/:denom',
 		'GET /chain/staking/validators?status=BOND_STATUS_BONDED',
 		'GET /chain/staking/pool',
@@ -499,15 +632,23 @@ const server = http.createServer(async (req, res) => {
 })
 
 // Start server
-initClient()
-server.listen(PORT, () => {
-	console.log(`[ChainQuery] Running on port ${PORT}`)
-	console.log(`[ChainQuery] gRPC endpoint: ${GRPC_ENDPOINT}`)
-	console.log(`[ChainQuery] Endpoints:`)
-	console.log(`  GET /chain/health`)
-	console.log(`  GET /chain/balances/:address`)
-	console.log(`  GET /chain/spendable/:address`)
-	console.log(`  GET /chain/supply/:denom`)
-	console.log(`  GET /chain/staking/validators`)
-	console.log(`  GET /chain/staking/pool`)
+async function start() {
+	await initClient()
+	server.listen(PORT, () => {
+		console.log(`[ChainQuery] Running on port ${PORT}`)
+		console.log(`[ChainQuery] gRPC endpoint: ${GRPC_ENDPOINT}`)
+		console.log(`[ChainQuery] Endpoints:`)
+		console.log(`  GET /chain/health`)
+		console.log(`  GET /chain/params`)
+		console.log(`  GET /chain/balances/:address (auto-converts valoper/valcons)`)
+		console.log(`  GET /chain/spendable/:address (auto-converts valoper/valcons)`)
+		console.log(`  GET /chain/supply/:denom`)
+		console.log(`  GET /chain/staking/validators`)
+		console.log(`  GET /chain/staking/pool`)
+	})
+}
+
+start().catch((err) => {
+	console.error('[ChainQuery] Fatal error:', err)
+	process.exit(1)
 })
