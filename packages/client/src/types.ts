@@ -166,3 +166,44 @@ export interface ProposalSnapshot {
 	no_with_veto_count: string
 	snapshot_time: string
 }
+
+// Delegation Events
+
+export interface DelegationEvent {
+	id: string
+	tx_hash: string
+	event_type: 'DELEGATE' | 'UNDELEGATE' | 'REDELEGATE' | 'CREATE_VALIDATOR'
+	delegator_address: string
+	validator_address: string
+	src_validator_address: string | null
+	amount: string | null
+	denom: string | null
+	timestamp: string | null
+	block_height: number | null
+	validator_moniker?: string | null
+}
+
+export interface DelegatorDelegation {
+	validator_address: string
+	validator_moniker: string | null
+	commission_rate: string | null
+	validator_status: string | null
+	validator_jailed: boolean | null
+	denom: string | null
+	total_delegated: string
+}
+
+export interface DelegatorDelegationsResponse {
+	delegations: DelegatorDelegation[]
+	total_staked: string
+	validator_count: number
+}
+
+export interface DelegatorStats {
+	total_delegations: number
+	total_undelegations: number
+	total_redelegations: number
+	first_delegation: string | null
+	last_activity: string | null
+	unique_validators: number
+}

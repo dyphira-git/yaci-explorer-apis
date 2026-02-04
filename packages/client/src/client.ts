@@ -11,7 +11,10 @@ import type {
 	ChainStats,
 	SearchResult,
 	GovernanceProposal,
-	ProposalSnapshot
+	ProposalSnapshot,
+	DelegationEvent,
+	DelegatorDelegationsResponse,
+	DelegatorStats
 } from './types'
 
 export interface YaciClientConfig {
@@ -220,6 +223,70 @@ export class YaciClient {
 		return this.query('governance_snapshots', {
 			proposal_id: `eq.${proposalId}`,
 			order: 'snapshot_time.desc'
+		})
+	}
+
+	// Delegator endpoints
+
+	/**
+	 * Get delegation history for a specific delegator address
+	 * @param delegatorAddress - The delegator's address (Cosmos bech32 format)
+	 * @param limit - Max results per page (default 50)
+	 * @param offset - Pagination offset (default 0)
+	 * @param eventType - Optional filter by event type
+	 */
+	async getDelegatorHistory(
+		delegatorAddress: string,
+		limit = 50,
+		offset = 0,
+		eventType?: 'DELEGATE' | 'UNDELEGATE' | 'REDELEGATE' | 'CREATE_VALIDATOR'
+	): Promise<PaginatedResponse<DelegationEvent>> {
+		return this.rpc('get_delegator_history', {
+			_delegator_address: delegatorAddress,
+			_limit: limit,
+			_offset: offset,
+			_event_type: eventType
+		})
+	}
+
+	/**
+	 * Get current delegations for a delegator (aggregated by validator)
+	 * @param delegatorAddress - The delegator's address (Cosmos bech32 format)
+	 */
+	async getDelegatorDelegations(delegatorAddress: string): Promise<DelegatorDelegationsResponse> {
+		return this.rpc('get_delegator_delegations', {
+			_delegator_address: delegatorAddress
+		})
+	}
+
+	/**
+	 * Get delegation statistics for a delegator
+	 * @param delegatorAddress - The delegator's address (Cosmos bech32 format)
+	 */
+	async getDelegatorStats(delegatorAddress: string): Promise<DelegatorStats> {
+		return this.rpc('get_delegator_stats', {
+			_delegator_address: delegatorAddress
+		})
+	}
+
+	/**
+	 * Get delegation history between a delegator and specific validator
+	 * @param delegatorAddress - The delegator's address (Cosmos bech32 format)
+	 * @param validatorAddress - The validator's operator address
+	 * @param limit - Max results per page (default 50)
+	 * @param offset - Pagination offset (default 0)
+	 */
+	async getDelegatorValidatorHistory(
+		delegatorAddress: string,
+		validatorAddress: string,
+		limit = 50,
+		offset = 0
+	): Promise<PaginatedResponse<DelegationEvent>> {
+		return this.rpc('get_delegator_validator_history', {
+			_delegator_address: delegatorAddress,
+			_validator_address: validatorAddress,
+			_limit: limit,
+			_offset: offset
 		})
 	}
 }
