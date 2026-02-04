@@ -240,7 +240,7 @@ async function processBatch(pool: pg.Pool, root: protobuf.Root): Promise<number>
 			}
 
 			const responseQuery = await client.query(
-				'SELECT data->\'txResponse\'->\'data\' as response_data FROM api.transactions_raw WHERE id = $1',
+				'SELECT data->\'txResponse\'->>\'data\' as response_data FROM api.transactions_raw WHERE id = $1',
 				[tx_id]
 			)
 
