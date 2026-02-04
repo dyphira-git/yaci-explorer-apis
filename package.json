@@ -12,6 +12,9 @@
 		"migrate": "./scripts/migrate.sh",
 		"migrate:dry": "./scripts/migrate.sh --dry-run",
 		"decode:evm": "npx tsx scripts/decode-evm.ts",
+		"decode:evm:daemon": "npx tsx scripts/decode-evm-daemon.ts",
+		"decode:evm:priority": "npx tsx scripts/decode-evm-single.ts",
+		"backfill:evm": "npx tsx scripts/backfill-evm-contracts.ts",
 		"test:evm-hash-lookup": "npx tsx scripts/test-evm-hash-lookup.ts"
 	},
 	"dependencies": {
