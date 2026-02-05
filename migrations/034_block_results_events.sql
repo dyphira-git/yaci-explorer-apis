@@ -121,15 +121,23 @@ END;
 $$ LANGUAGE plpgsql;
 
 -- ============================================================================
--- Trigger on block_results_raw
+-- Trigger on block_results_raw (if table exists)
+-- Note: block_results_raw is created by migration 041; this trigger will be
+-- recreated there. We skip here if table doesn't exist yet.
 -- ============================================================================
 
-DROP TRIGGER IF EXISTS trigger_extract_finalize_events ON api.block_results_raw;
-
-CREATE TRIGGER trigger_extract_finalize_events
-  AFTER INSERT ON api.block_results_raw
-  FOR EACH ROW
-  EXECUTE FUNCTION api.extract_finalize_block_events();
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'api' AND table_name = 'block_results_raw') THEN
+    DROP TRIGGER IF EXISTS trigger_extract_finalize_events ON api.block_results_raw;
+    CREATE TRIGGER trigger_extract_finalize_events
+      AFTER INSERT ON api.block_results_raw
+      FOR EACH ROW
+      EXECUTE FUNCTION api.extract_finalize_block_events();
+  ELSE
+    RAISE NOTICE 'Skipping trigger creation: api.block_results_raw does not exist yet (will be created in migration 041)';
+  END IF;
+END $$;
 
 -- ============================================================================
 -- Function: Get jailing events for a validator
