@@ -122,12 +122,20 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
--- Create trigger for rewards extraction (only if not exists)
-DROP TRIGGER IF EXISTS trigger_extract_rewards ON api.block_results_raw;
-CREATE TRIGGER trigger_extract_rewards
-  AFTER INSERT ON api.block_results_raw
-  FOR EACH ROW
-  EXECUTE FUNCTION api.extract_rewards_from_events();
+-- Create trigger for rewards extraction (only if table exists)
+-- Note: block_results_raw is created by migration 041; trigger will be recreated there
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'api' AND table_name = 'block_results_raw') THEN
+    DROP TRIGGER IF EXISTS trigger_extract_rewards ON api.block_results_raw;
+    CREATE TRIGGER trigger_extract_rewards
+      AFTER INSERT ON api.block_results_raw
+      FOR EACH ROW
+      EXECUTE FUNCTION api.extract_rewards_from_events();
+  ELSE
+    RAISE NOTICE 'Skipping trigger creation: api.block_results_raw does not exist yet (will be created in migration 041)';
+  END IF;
+END $$;
 
 -- ============================================================================
 -- Function: Get validator rewards history
