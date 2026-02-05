@@ -18,7 +18,7 @@
 
 import * as http from 'http'
 import * as grpc from '@grpc/grpc-js'
-import * as protobuf from 'protobufjs'
+import protobuf from 'protobufjs'
 
 const GRPC_ENDPOINT = process.env.CHAIN_GRPC_ENDPOINT || 'localhost:9090'
 const PORT = parseInt(process.env.CHAIN_QUERY_PORT || '3001', 10)
