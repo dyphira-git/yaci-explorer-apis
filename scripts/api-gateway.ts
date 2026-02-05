@@ -71,16 +71,36 @@ function proxyRequest(
 
 	proxyReq.on('error', (err) => {
 		console.error(`[Gateway] Proxy error to port ${targetPort}:`, err.message)
-		res.writeHead(502)
+		// CORS headers already set by server handler
+		res.writeHead(502, { 'Content-Type': 'application/json' })
 		res.end(JSON.stringify({ error: 'Bad Gateway', message: err.message }))
 	})
 
 	req.pipe(proxyReq)
 }
 
+// Add CORS headers to response
+function setCorsHeaders(res: http.ServerResponse) {
+	res.setHeader('Access-Control-Allow-Origin', '*')
+	res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS, PATCH, DELETE')
+	res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, Prefer, Range, Range-Unit')
+	res.setHeader('Access-Control-Expose-Headers', 'Content-Range, Range-Unit')
+}
+
 // Gateway server
 const server = http.createServer((req, res) => {
 	const url = req.url || '/'
+
+	// Handle CORS preflight
+	if (req.method === 'OPTIONS') {
+		setCorsHeaders(res)
+		res.writeHead(204)
+		res.end()
+		return
+	}
+
+	// Add CORS headers to all responses
+	setCorsHeaders(res)
 
 	// Route /chain/* to chain query service (but not /chain_stats, etc.)
 	if (url.startsWith('/chain/') || url === '/chain') {
