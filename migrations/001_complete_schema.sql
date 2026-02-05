@@ -3,6 +3,8 @@
 -- Clean start with proper EVM and Cosmos domain support
 -- =============================================================================
 
+BEGIN;
+
 -- =============================================================================
 -- CORE TABLES (populated by Yaci indexer)
 -- =============================================================================
@@ -709,3 +711,5 @@ GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA api TO web_anon;
 
 -- Grant usage on schema
 GRANT USAGE ON SCHEMA api TO web_anon;
+
+COMMIT;
