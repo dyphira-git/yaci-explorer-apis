@@ -84,6 +84,16 @@ jobs:
             echo "=== Migration structure validation passed ==="
           fi
 
+      - name: Setup database prerequisites
+        env:
+          DATABASE_URL: postgres://test:test@localhost:5432/yaci_test
+        run: |
+          echo "=== Setting up database prerequisites ==="
+          psql "$DATABASE_URL" -c "CREATE SCHEMA IF NOT EXISTS api;"
+          psql "$DATABASE_URL" -c "CREATE ROLE web_anon NOLOGIN;"
+          psql "$DATABASE_URL" -c "GRANT USAGE ON SCHEMA api TO web_anon;"
+          echo "=== Database prerequisites created ==="
+
       - name: Dry-run migrations against test database
         env:
           DATABASE_URL: postgres://test:test@localhost:5432/yaci_test
