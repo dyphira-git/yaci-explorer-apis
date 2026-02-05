@@ -10,26 +10,29 @@ BEGIN;
 -- Backfill rewards from finalize_block_events
 -- ============================================================================
 
+-- Aggregate rewards and commission per (height, validator) before inserting
+-- to avoid "ON CONFLICT DO UPDATE cannot affect row a second time" error
 INSERT INTO api.validator_rewards (height, validator_address, rewards, commission)
 SELECT
   f.height,
   f.attributes->>'validator' as validator_address,
-  CASE WHEN f.event_type = 'rewards' THEN
+  SUM(CASE WHEN f.event_type = 'rewards' THEN
     COALESCE(
       NULLIF(regexp_replace(f.attributes->>'amount', '[^0-9.]', '', 'g'), '')::NUMERIC,
       0
     ) / 1e18
-  ELSE 0 END as rewards,
-  CASE WHEN f.event_type = 'commission' THEN
+  ELSE 0 END) as rewards,
+  SUM(CASE WHEN f.event_type = 'commission' THEN
     COALESCE(
       NULLIF(regexp_replace(f.attributes->>'amount', '[^0-9.]', '', 'g'), '')::NUMERIC,
       0
     ) / 1e18
-  ELSE 0 END as commission
+  ELSE 0 END) as commission
 FROM api.finalize_block_events f
 WHERE f.event_type IN ('rewards', 'commission')
   AND f.attributes->>'validator' IS NOT NULL
   AND f.attributes->>'validator' != ''
+GROUP BY f.height, f.attributes->>'validator'
 ON CONFLICT (height, validator_address)
 DO UPDATE SET
   rewards = api.validator_rewards.rewards + EXCLUDED.rewards,
