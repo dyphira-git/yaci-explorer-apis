@@ -178,6 +178,9 @@ async function refreshValidators(pool: pg.Pool): Promise<void> {
 	try {
 		await client.query('BEGIN')
 
+		// Build set of operator addresses from chain response
+		const chainAddresses = new Set(validators.map((v: any) => v.operatorAddress || '').filter(Boolean))
+
 		for (const validator of validators) {
 			try {
 				await upsertValidator(client, validator)
@@ -186,6 +189,19 @@ async function refreshValidators(pool: pg.Pool): Promise<void> {
 				errors++
 				console.error(`[ValidatorRefresh] Error upserting ${validator.operatorAddress}: ${err.message}`)
 			}
+		}
+
+		// Mark validators in DB that are no longer on chain as UNBONDED
+		// These are "ghost" validators that were removed from chain state
+		const { rowCount: ghostCount } = await client.query(
+			`UPDATE api.validators
+			 SET status = 'BOND_STATUS_UNBONDED', jailed = true, updated_at = NOW()
+			 WHERE status = 'BOND_STATUS_BONDED'
+			   AND operator_address NOT IN (SELECT unnest($1::text[]))`,
+			[Array.from(chainAddresses)]
+		)
+		if (ghostCount && ghostCount > 0) {
+			console.log(`[ValidatorRefresh] Marked ${ghostCount} ghost validators as unbonded`)
 		}
 
 		await client.query('COMMIT')
