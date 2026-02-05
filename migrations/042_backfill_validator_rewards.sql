@@ -36,10 +36,17 @@ DO UPDATE SET
   commission = api.validator_rewards.commission + EXCLUDED.commission;
 
 -- ============================================================================
--- Refresh materialized views that depend on validator_rewards
+-- Refresh materialized views that depend on validator_rewards (if they exist)
 -- ============================================================================
 
-REFRESH MATERIALIZED VIEW IF EXISTS api.mv_daily_rewards;
-REFRESH MATERIALIZED VIEW IF EXISTS api.mv_validator_leaderboard;
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_matviews WHERE schemaname = 'api' AND matviewname = 'mv_daily_rewards') THEN
+    REFRESH MATERIALIZED VIEW api.mv_daily_rewards;
+  END IF;
+  IF EXISTS (SELECT 1 FROM pg_matviews WHERE schemaname = 'api' AND matviewname = 'mv_validator_leaderboard') THEN
+    REFRESH MATERIALIZED VIEW api.mv_validator_leaderboard;
+  END IF;
+END $$;
 
 COMMIT;
