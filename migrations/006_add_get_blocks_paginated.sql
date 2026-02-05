@@ -17,16 +17,16 @@ AS $$
     -- Count transactions per block
     SELECT
       t.height AS block_id,
-      COUNT(*) AS tx_count
+      COUNT(*) AS computed_tx_count
     FROM api.transactions_main t
     GROUP BY t.height
   ),
   filtered_blocks AS (
-    SELECT b.*
+    SELECT b.id, b.data
     FROM api.blocks_raw b
     LEFT JOIN block_tx_counts btc ON b.id = btc.block_id
     WHERE
-      (_min_tx_count IS NULL OR COALESCE(btc.tx_count, 0) >= _min_tx_count)
+      (_min_tx_count IS NULL OR COALESCE(btc.computed_tx_count, 0) >= _min_tx_count)
       AND (_from_date IS NULL OR (b.data->'block'->'header'->>'time')::timestamp >= _from_date)
       AND (_to_date IS NULL OR (b.data->'block'->'header'->>'time')::timestamp <= _to_date)
     ORDER BY b.id DESC
@@ -35,7 +35,7 @@ AS $$
     SELECT COUNT(*) AS count FROM filtered_blocks
   ),
   paginated AS (
-    SELECT f.*, btc.tx_count
+    SELECT f.id, f.data, btc.computed_tx_count AS tx_count
     FROM filtered_blocks f
     LEFT JOIN block_tx_counts btc ON f.id = btc.block_id
     LIMIT _limit OFFSET _offset
