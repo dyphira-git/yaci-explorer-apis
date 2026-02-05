@@ -31,12 +31,13 @@ CREATE UNIQUE INDEX IF NOT EXISTS mv_validator_delegator_counts_addr_idx
 CREATE MATERIALIZED VIEW IF NOT EXISTS api.mv_fee_revenue_daily AS
 SELECT
   date_trunc('day', timestamp)::date AS date,
-  fee->>'denom' AS fee_denom,
-  SUM(NULLIF(fee->>'amount', '')::NUMERIC) AS total_fees,
+  f->>'denom' AS fee_denom,
+  SUM(NULLIF(f->>'amount', '')::NUMERIC) AS total_fees,
   COUNT(*) AS tx_count
-FROM api.transactions_main
-WHERE fee IS NOT NULL AND fee->>'amount' IS NOT NULL AND fee->>'amount' != ''
-GROUP BY date_trunc('day', timestamp)::date, fee->>'denom';
+FROM api.transactions_main,
+  LATERAL jsonb_array_elements(CASE WHEN jsonb_typeof(fee) = 'array' THEN fee ELSE '[]'::jsonb END) AS f
+WHERE fee IS NOT NULL AND jsonb_typeof(fee) = 'array' AND jsonb_array_length(fee) > 0
+GROUP BY date_trunc('day', timestamp)::date, f->>'denom';
 
 CREATE UNIQUE INDEX IF NOT EXISTS mv_fee_revenue_daily_date_denom_idx
   ON api.mv_fee_revenue_daily(date, fee_denom);
