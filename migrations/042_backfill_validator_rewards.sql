@@ -1,0 +1,45 @@
+-- Migration 042: Backfill validator_rewards from finalize_block_events
+--
+-- The validator_rewards table is empty because the trigger wasn't attached
+-- (block_results_raw table didn't exist when trigger was created).
+-- This migration backfills from the already-parsed finalize_block_events table.
+
+BEGIN;
+
+-- ============================================================================
+-- Backfill rewards from finalize_block_events
+-- ============================================================================
+
+INSERT INTO api.validator_rewards (height, validator_address, rewards, commission)
+SELECT
+  f.height,
+  f.attributes->>'validator' as validator_address,
+  CASE WHEN f.event_type = 'rewards' THEN
+    COALESCE(
+      NULLIF(regexp_replace(f.attributes->>'amount', '[^0-9.]', '', 'g'), '')::NUMERIC,
+      0
+    ) / 1e18
+  ELSE 0 END as rewards,
+  CASE WHEN f.event_type = 'commission' THEN
+    COALESCE(
+      NULLIF(regexp_replace(f.attributes->>'amount', '[^0-9.]', '', 'g'), '')::NUMERIC,
+      0
+    ) / 1e18
+  ELSE 0 END as commission
+FROM api.finalize_block_events f
+WHERE f.event_type IN ('rewards', 'commission')
+  AND f.attributes->>'validator' IS NOT NULL
+  AND f.attributes->>'validator' != ''
+ON CONFLICT (height, validator_address)
+DO UPDATE SET
+  rewards = api.validator_rewards.rewards + EXCLUDED.rewards,
+  commission = api.validator_rewards.commission + EXCLUDED.commission;
+
+-- ============================================================================
+-- Refresh materialized views that depend on validator_rewards
+-- ============================================================================
+
+REFRESH MATERIALIZED VIEW IF EXISTS api.mv_daily_rewards;
+REFRESH MATERIALIZED VIEW IF EXISTS api.mv_validator_leaderboard;
+
+COMMIT;
