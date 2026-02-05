@@ -207,3 +207,68 @@ export interface DelegatorStats {
 	last_activity: string | null
 	unique_validators: number
 }
+
+// Analytics
+
+export interface NetworkOverview {
+	total_validators: number
+	active_validators: number
+	jailed_validators: number
+	total_bonded_tokens: string
+	total_rewards_24h: string
+	total_commission_24h: string
+	avg_block_time: number
+	total_transactions: number
+	unique_addresses: number
+}
+
+export interface ValidatorRewardsHistory {
+	height: number
+	rewards: string
+	commission: string
+	block_time: string | null
+}
+
+export interface ValidatorTotalRewards {
+	total_rewards: string
+	total_commission: string
+	blocks_with_rewards: number
+}
+
+export interface HourlyRewards {
+	hour: string
+	rewards: string
+	commission: string
+}
+
+export interface ValidatorPerformance {
+	uptime_percentage: number
+	blocks_signed: number
+	blocks_missed: number
+	total_jailing_events: number
+	last_jailed_height: number | null
+	rewards_rank: number | null
+	delegation_rank: number | null
+}
+
+export interface ValidatorLeaderboardEntry {
+	operator_address: string
+	moniker: string
+	tokens: string
+	commission_rate: string
+	jailed: boolean
+	delegator_count: number
+	lifetime_rewards: string
+	lifetime_commission: string
+	jail_count: number
+	last_jailed_height: number | null
+}
+
+export interface ValidatorEventSummary {
+	height: number
+	event_type: string
+	validator_moniker: string | null
+	operator_address: string | null
+	details: Record<string, string>
+	block_time: string | null
+}
