@@ -36,7 +36,7 @@ SELECT
   COUNT(*) AS tx_count
 FROM api.transactions_main,
   LATERAL jsonb_array_elements(CASE WHEN jsonb_typeof(fee) = 'array' THEN fee ELSE '[]'::jsonb END) AS f
-WHERE fee IS NOT NULL AND jsonb_typeof(fee) = 'array' AND jsonb_array_length(fee) > 0
+WHERE fee IS NOT NULL AND jsonb_typeof(fee) = 'array'
 GROUP BY date_trunc('day', timestamp)::date, f->>'denom';
 
 CREATE UNIQUE INDEX IF NOT EXISTS mv_fee_revenue_daily_date_denom_idx
