@@ -335,6 +335,69 @@ const PROTOS = {
 			uint64 total = 2;
 		}
 	`,
+	slashing: `
+		syntax = "proto3";
+		package cosmos.slashing.v1beta1;
+
+		service Query {
+			rpc Params(QueryParamsRequest) returns (QueryParamsResponse);
+			rpc SigningInfo(QuerySigningInfoRequest) returns (QuerySigningInfoResponse);
+			rpc SigningInfos(QuerySigningInfosRequest) returns (QuerySigningInfosResponse);
+		}
+
+		message QueryParamsRequest {}
+
+		message QueryParamsResponse {
+			Params params = 1;
+		}
+
+		message Params {
+			int64 signed_blocks_window = 1;
+			bytes min_signed_per_window = 2;
+			string downtime_jail_duration = 3;
+			bytes slash_fraction_double_sign = 4;
+			bytes slash_fraction_downtime = 5;
+		}
+
+		message QuerySigningInfoRequest {
+			string cons_address = 1;
+		}
+
+		message QuerySigningInfoResponse {
+			ValidatorSigningInfo val_signing_info = 1;
+		}
+
+		message QuerySigningInfosRequest {
+			PageRequest pagination = 1;
+		}
+
+		message QuerySigningInfosResponse {
+			repeated ValidatorSigningInfo info = 1;
+			PageResponse pagination = 2;
+		}
+
+		message ValidatorSigningInfo {
+			string address = 1;
+			int64 start_height = 2;
+			int64 index_offset = 3;
+			string jailed_until = 4;
+			bool tombstoned = 5;
+			int64 missed_blocks_counter = 6;
+		}
+
+		message PageRequest {
+			bytes key = 1;
+			uint64 offset = 2;
+			uint64 limit = 3;
+			bool count_total = 4;
+			bool reverse = 5;
+		}
+
+		message PageResponse {
+			bytes next_key = 1;
+			uint64 total = 2;
+		}
+	`,
 }
 
 // Generic gRPC query client
@@ -559,6 +622,106 @@ class ChainQueryClient {
 		})
 	}
 
+	// Slashing queries
+
+	/** Returns all slashing gRPC method definitions */
+	private slashingMethods() {
+		return {
+			Params: {
+				path: '/cosmos.slashing.v1beta1.Query/Params',
+				requestType: 'cosmos.slashing.v1beta1.QueryParamsRequest',
+				responseType: 'cosmos.slashing.v1beta1.QueryParamsResponse',
+			},
+			SigningInfo: {
+				path: '/cosmos.slashing.v1beta1.Query/SigningInfo',
+				requestType: 'cosmos.slashing.v1beta1.QuerySigningInfoRequest',
+				responseType: 'cosmos.slashing.v1beta1.QuerySigningInfoResponse',
+			},
+			SigningInfos: {
+				path: '/cosmos.slashing.v1beta1.Query/SigningInfos',
+				requestType: 'cosmos.slashing.v1beta1.QuerySigningInfosRequest',
+				responseType: 'cosmos.slashing.v1beta1.QuerySigningInfosResponse',
+			},
+		}
+	}
+
+	/** Fetches slashing params (signed_blocks_window, etc.) */
+	async getSlashingParams(): Promise<any> {
+		const stub = this.getStub('cosmos.slashing.v1beta1.Query', this.slashingMethods())
+
+		return new Promise((resolve, reject) => {
+			stub.Params({}, (err: Error | null, response: any) => {
+				if (err) {
+					reject(err)
+					return
+				}
+				const params = response.params || {}
+				resolve({
+					params: {
+						signed_blocks_window: params.signed_blocks_window?.toString() || params.signedBlocksWindow?.toString() || '0',
+						min_signed_per_window: params.min_signed_per_window?.toString() || params.minSignedPerWindow?.toString() || '0',
+						downtime_jail_duration: params.downtime_jail_duration || params.downtimeJailDuration || '0s',
+						slash_fraction_double_sign: params.slash_fraction_double_sign?.toString() || params.slashFractionDoubleSign?.toString() || '0',
+						slash_fraction_downtime: params.slash_fraction_downtime?.toString() || params.slashFractionDowntime?.toString() || '0',
+					},
+				})
+			})
+		})
+	}
+
+	/** Fetches signing info for a specific validator by consensus address */
+	async getSigningInfo(consAddress: string): Promise<any> {
+		const stub = this.getStub('cosmos.slashing.v1beta1.Query', this.slashingMethods())
+
+		return new Promise((resolve, reject) => {
+			stub.SigningInfo({ cons_address: consAddress }, (err: Error | null, response: any) => {
+				if (err) {
+					// Not found is ok - validator may not have signing info yet
+					if (err.message?.includes('NotFound') || err.message?.includes('not found')) {
+						resolve({ val_signing_info: null })
+						return
+					}
+					reject(err)
+					return
+				}
+				const info = response.val_signing_info || response.valSigningInfo || {}
+				resolve({
+					val_signing_info: {
+						address: info.address || '',
+						start_height: info.start_height?.toString() || info.startHeight?.toString() || '0',
+						index_offset: info.index_offset?.toString() || info.indexOffset?.toString() || '0',
+						jailed_until: info.jailed_until || info.jailedUntil || null,
+						tombstoned: info.tombstoned || false,
+						missed_blocks_counter: info.missed_blocks_counter?.toString() || info.missedBlocksCounter?.toString() || '0',
+					},
+				})
+			})
+		})
+	}
+
+	/** Fetches signing info for all validators */
+	async getAllSigningInfos(): Promise<any> {
+		const stub = this.getStub('cosmos.slashing.v1beta1.Query', this.slashingMethods())
+
+		return new Promise((resolve, reject) => {
+			stub.SigningInfos({ pagination: { limit: 500 } }, (err: Error | null, response: any) => {
+				if (err) {
+					reject(err)
+					return
+				}
+				const infos = (response.info || []).map((info: any) => ({
+					address: info.address || '',
+					start_height: info.start_height?.toString() || info.startHeight?.toString() || '0',
+					index_offset: info.index_offset?.toString() || info.indexOffset?.toString() || '0',
+					jailed_until: info.jailed_until || info.jailedUntil || null,
+					tombstoned: info.tombstoned || false,
+					missed_blocks_counter: info.missed_blocks_counter?.toString() || info.missedBlocksCounter?.toString() || '0',
+				}))
+				resolve({ info: infos })
+			})
+		})
+	}
+
 	// Auth queries
 
 	/** Fetches account info (account number, sequence) for signing transactions */
@@ -725,6 +888,21 @@ const routes: Array<{ pattern: RegExp; handler: RouteHandler }> = [
 		pattern: /^\/chain\/auth\/account\/([a-zA-Z0-9]+)$/,
 		handler: async (params) => client.getAccount(params.address),
 	},
+	// GET /chain/slashing/params - Get slashing params
+	{
+		pattern: /^\/chain\/slashing\/params$/,
+		handler: async () => client.getSlashingParams(),
+	},
+	// GET /chain/slashing/signing_info/:cons_address - Get signing info for validator
+	{
+		pattern: /^\/chain\/slashing\/signing_info\/([a-zA-Z0-9]+)$/,
+		handler: async (params) => client.getSigningInfo(params.consAddress),
+	},
+	// GET /chain/slashing/signing_infos - Get all signing infos
+	{
+		pattern: /^\/chain\/slashing\/signing_infos$/,
+		handler: async () => client.getAllSigningInfos(),
+	},
 ]
 
 // Helper to read request body
@@ -890,6 +1068,7 @@ const server = http.createServer(async (req, res) => {
 			else if (url.pathname.includes('/spendable/')) params.address = match[1]
 			else if (url.pathname.includes('/supply/')) params.denom = match[1]
 			else if (url.pathname.includes('/auth/account/')) params.address = match[1]
+			else if (url.pathname.includes('/slashing/signing_info/')) params.consAddress = match[1]
 
 			try {
 				const result = await route.handler(params, url.searchParams)
@@ -914,6 +1093,9 @@ const server = http.createServer(async (req, res) => {
 		'GET  /chain/staking/validators?status=BOND_STATUS_BONDED',
 		'GET  /chain/staking/pool',
 		'GET  /chain/auth/account/:address',
+		'GET  /chain/slashing/params',
+		'GET  /chain/slashing/signing_info/:cons_address',
+		'GET  /chain/slashing/signing_infos',
 		'POST /chain/tx/broadcast',
 	]}))
 })
@@ -931,5 +1113,8 @@ server.listen(PORT, () => {
 	console.log(`  GET  /chain/staking/validators`)
 	console.log(`  GET  /chain/staking/pool`)
 	console.log(`  GET  /chain/auth/account/:address`)
+	console.log(`  GET  /chain/slashing/params`)
+	console.log(`  GET  /chain/slashing/signing_info/:cons_address`)
+	console.log(`  GET  /chain/slashing/signing_infos`)
 	console.log(`  POST /chain/tx/broadcast`)
 })
