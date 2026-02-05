@@ -66,6 +66,7 @@ DECLARE
   pubkey_base64 TEXT;
   consensus_addr TEXT;
   valoper_addr TEXT;
+  tx_height BIGINT;
 BEGIN
   -- Check if this is a MsgCreateValidator message
   msg_type := NEW.type;
@@ -81,6 +82,11 @@ BEGIN
   IF raw_data IS NULL THEN
     RETURN NEW;
   END IF;
+
+  -- Get the transaction height
+  SELECT height INTO tx_height
+  FROM api.transactions_main
+  WHERE id = NEW.id;
 
   -- Extract pubkey (handles both camelCase and snake_case)
   pubkey_data := COALESCE(raw_data->'pubkey', raw_data->'pub_key');
@@ -117,7 +123,7 @@ BEGIN
   ) VALUES (
     consensus_addr,
     valoper_addr,
-    NEW.height
+    tx_height
   )
   ON CONFLICT (consensus_address) DO UPDATE
   SET operator_address = EXCLUDED.operator_address
@@ -151,11 +157,12 @@ DECLARE
   updated_count INTEGER := 0;
 BEGIN
   FOR msg IN
-    SELECT m.id, m.type, m.height, mr.data
+    SELECT m.id, m.type, t.height, mr.data
     FROM api.messages_main m
     JOIN api.messages_raw mr ON mr.id = m.id
+    JOIN api.transactions_main t ON t.id = m.id
     WHERE m.type LIKE '%MsgCreateValidator'
-    ORDER BY m.height
+    ORDER BY t.height
   LOOP
     processed_count := processed_count + 1;
     raw_data := msg.data;
