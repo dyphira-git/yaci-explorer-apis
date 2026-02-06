@@ -93,7 +93,10 @@ $$;
 -- ============================================================================
 -- 2. Fix get_recent_validator_events: case-insensitive join + richer return data
 --    CometBFT stores addresses as lowercase hex, mapping table has UPPER hex
+--    DROP required because return type changes (added block_time, attributes)
 -- ============================================================================
+
+DROP FUNCTION IF EXISTS api.get_recent_validator_events(TEXT[], INTEGER, INTEGER);
 
 CREATE OR REPLACE FUNCTION api.get_recent_validator_events(
   _event_types TEXT[] DEFAULT ARRAY['slash', 'liveness', 'jail'],
@@ -139,7 +142,10 @@ $$ LANGUAGE plpgsql STABLE;
 
 -- ============================================================================
 -- 3. Fix get_network_overview: add max_validators for meaningful health metric
+--    DROP required because return type changes (added max_validators column)
 -- ============================================================================
+
+DROP FUNCTION IF EXISTS api.get_network_overview();
 
 CREATE OR REPLACE FUNCTION api.get_network_overview()
 RETURNS TABLE (
