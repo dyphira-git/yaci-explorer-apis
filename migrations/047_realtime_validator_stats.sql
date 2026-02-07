@@ -58,6 +58,7 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
+DROP TRIGGER IF EXISTS trg_vbs_update_validator_stats ON api.validator_block_signatures;
 CREATE TRIGGER trg_vbs_update_validator_stats
   AFTER INSERT ON api.validator_block_signatures
   FOR EACH ROW
@@ -115,6 +116,7 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
+DROP TRIGGER IF EXISTS trg_fbe_update_validator_liveness ON api.finalize_block_events;
 CREATE TRIGGER trg_fbe_update_validator_liveness
   AFTER INSERT ON api.finalize_block_events
   FOR EACH ROW
