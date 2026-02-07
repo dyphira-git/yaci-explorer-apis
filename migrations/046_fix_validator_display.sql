@@ -1,13 +1,34 @@
 -- Migration 046: Fix validator display issues
--- 1. Fix get_validators_paginated to resolve consensus_address from mapping table
--- 2. Fix get_recent_validator_events case-insensitive join + richer data
--- 3. Fix get_network_overview to return max_validators for meaningful health metric
--- 4. Fix get_validator_events_summary case-insensitive join
+-- 1. Add hex_address column to validator_consensus_addresses + populate bech32 entries
+-- 2. Fix get_validators_paginated to resolve consensus_address from mapping table
+-- 3. Fix get_recent_validator_events: exact address match + richer data
+-- 4. Fix get_network_overview to return max_validators for meaningful health metric
+-- 5. Fix get_validator_events_summary: exact address match
 
 BEGIN;
 
 -- ============================================================================
--- 1. Fix get_validators_paginated: LEFT JOIN validator_consensus_addresses
+-- 1. Add hex_address column and populate bech32 entries in mapping table
+--    CometBFT finalize_block_events use bech32 (raivalcons1...),
+--    block_signatures use base64, validators table uses uppercase hex.
+--    We store all formats so JOINs work via exact match.
+-- ============================================================================
+
+ALTER TABLE api.validator_consensus_addresses
+  ADD COLUMN IF NOT EXISTS hex_address TEXT;
+
+-- Populate hex from base64 entries
+UPDATE api.validator_consensus_addresses
+SET hex_address = UPPER(encode(decode(consensus_address, 'base64'), 'hex'))
+WHERE hex_address IS NULL
+AND consensus_address ~ '^[A-Za-z0-9+/=]+$';
+
+-- Create index on hex_address for fast lookups
+CREATE INDEX IF NOT EXISTS idx_vca_hex_address
+  ON api.validator_consensus_addresses(hex_address);
+
+-- ============================================================================
+-- 2. Fix get_validators_paginated: LEFT JOIN validator_consensus_addresses
 --    so uptime lookup works even when validators.consensus_address is NULL
 -- ============================================================================
 
@@ -91,8 +112,8 @@ END;
 $$;
 
 -- ============================================================================
--- 2. Fix get_recent_validator_events: case-insensitive join + richer return data
---    CometBFT stores addresses as lowercase hex, mapping table has UPPER hex
+-- 3. Fix get_recent_validator_events: exact address match + richer return data
+--    Mapping table now contains bech32, base64, and hex entries for each validator.
 --    DROP required because return type changes (added block_time, attributes)
 -- ============================================================================
 
@@ -120,7 +141,7 @@ BEGIN
   SELECT
     f.height,
     f.event_type,
-    COALESCE(f.attributes->>'validator', f.attributes->>'address', '') as validator_address,
+    COALESCE(f.attributes->>'address', f.attributes->>'validator', '') as validator_address,
     v.operator_address,
     v.moniker,
     COALESCE(f.attributes->>'reason', '') as reason,
@@ -130,7 +151,7 @@ BEGIN
     f.attributes
   FROM api.finalize_block_events f
   LEFT JOIN api.validator_consensus_addresses vca
-    ON UPPER(vca.consensus_address) = UPPER(COALESCE(f.attributes->>'validator', f.attributes->>'address', ''))
+    ON vca.consensus_address = COALESCE(f.attributes->>'address', f.attributes->>'validator', '')
   LEFT JOIN api.validators v ON v.operator_address = vca.operator_address
   LEFT JOIN api.blocks_raw b ON b.id = f.height
   WHERE f.event_type = ANY(_event_types)
@@ -198,7 +219,7 @@ END;
 $$ LANGUAGE plpgsql STABLE;
 
 -- ============================================================================
--- 4. Fix get_validator_events_summary: case-insensitive join
+-- 5. Fix get_validator_events_summary: exact address match
 -- ============================================================================
 
 CREATE OR REPLACE FUNCTION api.get_validator_events_summary(
@@ -223,7 +244,7 @@ BEGIN
     (b.data->'block'->'header'->>'time')::timestamptz as block_time
   FROM api.finalize_block_events f
   LEFT JOIN api.validator_consensus_addresses vca
-    ON UPPER(vca.consensus_address) = UPPER(COALESCE(f.attributes->>'validator', f.attributes->>'address', ''))
+    ON vca.consensus_address = COALESCE(f.attributes->>'address', f.attributes->>'validator', '')
   LEFT JOIN api.validators v ON v.operator_address = vca.operator_address
   LEFT JOIN api.blocks_raw b ON b.id = f.height
   WHERE f.event_type IN ('slash', 'liveness', 'jail', 'rewards', 'commission')

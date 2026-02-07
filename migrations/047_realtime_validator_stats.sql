@@ -33,7 +33,8 @@ BEGIN
   -- Resolve consensus address to operator address
   SELECT vca.operator_address INTO op_addr
   FROM api.validator_consensus_addresses vca
-  WHERE UPPER(vca.consensus_address) = UPPER(NEW.consensus_address)
+  WHERE vca.consensus_address = NEW.consensus_address
+    OR vca.hex_address = UPPER(NEW.consensus_address)
   LIMIT 1;
 
   IF op_addr IS NULL THEN
@@ -77,15 +78,15 @@ BEGIN
     RETURN NEW;
   END IF;
 
-  addr := COALESCE(NEW.attributes->>'validator', NEW.attributes->>'address', '');
+  addr := COALESCE(NEW.attributes->>'address', NEW.attributes->>'validator', '');
   IF addr = '' THEN
     RETURN NEW;
   END IF;
 
-  -- Resolve to operator address
+  -- Resolve to operator address (exact match - table has bech32, base64, hex entries)
   SELECT vca.operator_address INTO op_addr
   FROM api.validator_consensus_addresses vca
-  WHERE UPPER(vca.consensus_address) = UPPER(addr)
+  WHERE vca.consensus_address = addr
   LIMIT 1;
 
   IF op_addr IS NULL THEN
@@ -95,6 +96,7 @@ BEGIN
   UPDATE api.validators
   SET
     missed_blocks_counter = COALESCE(
+      NULLIF(NEW.attributes->>'missed_blocks', '')::INTEGER,
       NULLIF(NEW.attributes->>'missed_blocks_counter', '')::INTEGER,
       missed_blocks_counter
     ),
@@ -131,7 +133,8 @@ WITH signing_agg AS (
     MAX(CASE WHEN vbs.signed THEN vbs.height END) AS max_signed_height
   FROM api.validator_block_signatures vbs
   JOIN api.validator_consensus_addresses vca
-    ON UPPER(vca.consensus_address) = UPPER(vbs.consensus_address)
+    ON vca.consensus_address = vbs.consensus_address
+      OR vca.hex_address = UPPER(vbs.consensus_address)
   GROUP BY vca.operator_address
 )
 UPDATE api.validators v
@@ -156,10 +159,13 @@ WITH liveness_agg AS (
     vca.operator_address,
     MAX(CASE WHEN f.event_type = 'jail' THEN f.height END) AS max_jail_height,
     MAX(CASE WHEN f.event_type = 'jail' THEN f.created_at END) AS max_jail_at,
-    MAX(NULLIF(f.attributes->>'missed_blocks_counter', '')::INTEGER) AS max_missed_counter
+    GREATEST(
+      MAX(NULLIF(f.attributes->>'missed_blocks', '')::INTEGER),
+      MAX(NULLIF(f.attributes->>'missed_blocks_counter', '')::INTEGER)
+    ) AS max_missed_counter
   FROM api.finalize_block_events f
   JOIN api.validator_consensus_addresses vca
-    ON UPPER(vca.consensus_address) = UPPER(COALESCE(f.attributes->>'validator', f.attributes->>'address', ''))
+    ON vca.consensus_address = COALESCE(f.attributes->>'address', f.attributes->>'validator', '')
   WHERE f.event_type IN ('slash', 'liveness', 'jail')
   GROUP BY vca.operator_address
 )
