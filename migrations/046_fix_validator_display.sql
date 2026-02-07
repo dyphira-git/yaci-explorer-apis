@@ -64,8 +64,12 @@ BEGIN
       COALESCE(dc.delegator_count, 0) AS delegator_count
     FROM api.validators v
     CROSS JOIN total_bonded tb
-    LEFT JOIN api.validator_consensus_addresses vca
-      ON vca.operator_address = v.operator_address
+    LEFT JOIN LATERAL (
+      SELECT vca_inner.consensus_address
+      FROM api.validator_consensus_addresses vca_inner
+      WHERE vca_inner.operator_address = v.operator_address
+      LIMIT 1
+    ) vca ON true
     LEFT JOIN api.validator_ipfs_addresses ipfs
       ON ipfs.validator_address = v.operator_address
     LEFT JOIN api.mv_validator_delegator_counts dc
