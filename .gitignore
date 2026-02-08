@@ -4,6 +4,7 @@ node_modules/
 dist/
 
 # Internal/development docs
+.claude/
 CLAUDE.md
 MIGRATION_PLAN.md
 TODO.md
