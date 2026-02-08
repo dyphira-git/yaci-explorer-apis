@@ -33,11 +33,33 @@ const cache = new Map<string, CacheEntry>()
 let cacheHits = 0
 let cacheMisses = 0
 
-/** Default TTL in ms per route prefix */
-const CACHE_TTL: Record<string, number> = {
-	'/chain/': 5000,
-	'/rpc/': 5000,
-	default: 10000,
+/**
+ * Cache tier definitions.
+ * Each entry has a gateway TTL (in-memory) and an HTTP Cache-Control max-age
+ * that tells browsers/CDNs how long to hold the response.
+ */
+interface CacheTier {
+	gatewayTtl: number
+	maxAge: number
+	staleWhileRevalidate: number
+}
+
+const CACHE_TIERS: Record<string, CacheTier> = {
+	// Analytics / materialized view endpoints - data refreshes every ~15 min
+	'/rpc/get_network_overview': { gatewayTtl: 60_000, maxAge: 30, staleWhileRevalidate: 60 },
+	'/rpc/get_hourly_rewards': { gatewayTtl: 60_000, maxAge: 30, staleWhileRevalidate: 60 },
+	'/rpc/get_validators_paginated': { gatewayTtl: 30_000, maxAge: 15, staleWhileRevalidate: 30 },
+	'/rpc/get_validator_performance': { gatewayTtl: 30_000, maxAge: 15, staleWhileRevalidate: 30 },
+	'/rpc/get_validator_events_summary': { gatewayTtl: 30_000, maxAge: 15, staleWhileRevalidate: 30 },
+	// Materialized view tables accessed directly
+	'/mv_': { gatewayTtl: 60_000, maxAge: 30, staleWhileRevalidate: 60 },
+	'/chain_stats': { gatewayTtl: 60_000, maxAge: 30, staleWhileRevalidate: 60 },
+	'/validator_stats': { gatewayTtl: 30_000, maxAge: 15, staleWhileRevalidate: 30 },
+	'/validators': { gatewayTtl: 30_000, maxAge: 15, staleWhileRevalidate: 30 },
+	// Chain gRPC proxy - live data, short cache
+	'/chain/': { gatewayTtl: 6_000, maxAge: 3, staleWhileRevalidate: 6 },
+	// Default for other PostgREST endpoints (blocks, transactions, etc.)
+	default: { gatewayTtl: 10_000, maxAge: 5, staleWhileRevalidate: 10 },
 }
 
 /** Routes that should never be cached */
@@ -48,12 +70,12 @@ function shouldSkipCache(method: string, url: string): boolean {
 	return false
 }
 
-/** Get TTL for a given URL */
-function getTtl(url: string): number {
-	for (const [prefix, ttl] of Object.entries(CACHE_TTL)) {
-		if (prefix !== 'default' && url.startsWith(prefix)) return ttl
+/** Get cache tier for a given URL */
+function getCacheTier(url: string): CacheTier {
+	for (const [prefix, tier] of Object.entries(CACHE_TIERS)) {
+		if (prefix !== 'default' && url.startsWith(prefix)) return tier
 	}
-	return CACHE_TTL.default
+	return CACHE_TIERS.default
 }
 
 /** Build cache key from method + url */
@@ -120,6 +142,8 @@ function proxyRequest(
 	const key = cacheKey(method, url)
 	const skipCache = shouldSkipCache(method, url)
 
+	const tier = getCacheTier(url)
+
 	// Check cache
 	if (!skipCache) {
 		const cached = cache.get(key)
@@ -160,18 +184,23 @@ function proxyRequest(
 
 			// Only cache successful responses
 			if (statusCode >= 200 && statusCode < 400) {
-				const ttl = getTtl(url)
-				const headers: http.OutgoingHttpHeaders = { ...proxyRes.headers }
+				const headers: http.OutgoingHttpHeaders = {
+					...proxyRes.headers,
+					'cache-control': `public, max-age=${tier.maxAge}, stale-while-revalidate=${tier.staleWhileRevalidate}`,
+				}
 				cache.set(key, {
 					statusCode,
 					headers,
 					body,
-					expiresAt: Date.now() + ttl,
+					expiresAt: Date.now() + tier.gatewayTtl,
 				})
 			}
 
-			res.setHeader('X-Cache', 'MISS')
-			res.writeHead(statusCode, proxyRes.headers)
+			res.writeHead(statusCode, {
+				...proxyRes.headers,
+				'x-cache': 'MISS',
+				'cache-control': `public, max-age=${tier.maxAge}, stale-while-revalidate=${tier.staleWhileRevalidate}`,
+			})
 			res.end(body)
 		})
 	})
@@ -190,7 +219,7 @@ function setCorsHeaders(res: http.ServerResponse) {
 	res.setHeader('Access-Control-Allow-Origin', '*')
 	res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS, PATCH, DELETE')
 	res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, Prefer, Range, Range-Unit')
-	res.setHeader('Access-Control-Expose-Headers', 'Content-Range, Range-Unit, X-Cache')
+	res.setHeader('Access-Control-Expose-Headers', 'Content-Range, Range-Unit, X-Cache, Cache-Control')
 }
 
 // Gateway server
@@ -256,6 +285,6 @@ setTimeout(() => {
 		console.log(`[Gateway] Routes:`)
 		console.log(`  /chain/* -> Chain Query Service (port ${CHAIN_QUERY_PORT})`)
 		console.log(`  /* -> PostgREST (port ${POSTGREST_PORT})`)
-		console.log(`[Gateway] Cache enabled (TTL: /chain/ 5s, /rpc/ 5s, default 10s)`)
+		console.log(`[Gateway] Cache enabled with tiered TTLs and Cache-Control headers`)
 	})
 }, 2000)

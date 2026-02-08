@@ -29,7 +29,7 @@ const { Pool } = pg
 const DATABASE_URL = process.env.DATABASE_URL || 'postgres://postgres:bOqwmcryOQcdmrO@localhost:15432/postgres?sslmode=disable'
 const CHAIN_QUERY_URL = process.env.CHAIN_QUERY_URL || 'https://yaci-explorer-apis.fly.dev'
 const REFRESH_INTERVAL_MS = parseInt(process.env.REFRESH_INTERVAL_MS || '900000', 10)
-const MV_REFRESH_EVERY_N = parseInt(process.env.MV_REFRESH_EVERY_N || '4', 10)
+const MV_REFRESH_EVERY_N = parseInt(process.env.MV_REFRESH_EVERY_N || '1', 10)
 
 /** Maps gRPC status enum to DB status string */
 function mapStatus(status: number | string): string {
@@ -221,17 +221,34 @@ async function refreshMaterializedViews(pool: pg.Pool): Promise<void> {
 	const startTime = Date.now()
 	console.log(`[MVRefresh] Refreshing analytics views...`)
 
+	const views = [
+		'api.mv_daily_tx_stats',
+		'api.mv_hourly_tx_stats',
+		'api.mv_message_type_stats',
+		'api.mv_validator_delegator_counts',
+		'api.mv_daily_rewards',
+		'api.mv_validator_leaderboard',
+		'api.mv_chain_stats',
+		'api.mv_network_overview',
+		'api.mv_hourly_rewards',
+	]
+
 	const client = await pool.connect()
 	try {
-		await client.query('REFRESH MATERIALIZED VIEW CONCURRENTLY api.mv_daily_tx_stats')
-		await client.query('REFRESH MATERIALIZED VIEW CONCURRENTLY api.mv_hourly_tx_stats')
-		await client.query('REFRESH MATERIALIZED VIEW CONCURRENTLY api.mv_message_type_stats')
+		for (const view of views) {
+			try {
+				await client.query(`REFRESH MATERIALIZED VIEW CONCURRENTLY ${view}`)
+			} catch (err: any) {
+				// View may not exist yet if migration hasn't run
+				console.warn(`[MVRefresh] Skipping ${view}: ${err.message}`)
+			}
+		}
 	} finally {
 		client.release()
 	}
 
 	const elapsed = Date.now() - startTime
-	console.log(`[MVRefresh] Done in ${elapsed}ms`)
+	console.log(`[MVRefresh] Done in ${elapsed}ms (${views.length} views)`)
 }
 
 /** Main loop */
