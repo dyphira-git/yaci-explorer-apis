@@ -614,7 +614,7 @@ class ChainQueryClient {
 
 		return new Promise((resolve, reject) => {
 			stub.Validator(
-				{ validator_addr: validatorAddr },
+				{ validatorAddr },
 				(err: Error | null, response: any) => {
 					if (err) {
 						reject(err)
@@ -727,7 +727,7 @@ class ChainQueryClient {
 		const stub = this.getStub('cosmos.slashing.v1beta1.Query', this.slashingMethods())
 
 		return new Promise((resolve, reject) => {
-			stub.SigningInfo({ cons_address: consAddress }, (err: Error | null, response: any) => {
+			stub.SigningInfo({ consAddress }, (err: Error | null, response: any) => {
 				if (err) {
 					// Not found is ok - validator may not have signing info yet
 					if (err.message?.includes('NotFound') || err.message?.includes('not found')) {
@@ -875,7 +875,7 @@ class ChainQueryClient {
 		})
 
 		return new Promise((resolve, reject) => {
-			stub.BroadcastTx({ tx_bytes: txBytes, mode }, (err: Error | null, response: any) => {
+			stub.BroadcastTx({ txBytes, mode }, (err: Error | null, response: any) => {
 				if (err) {
 					reject(err)
 					return
@@ -1029,13 +1029,13 @@ const server = http.createServer(async (req, res) => {
 					const msgCopy = { ...msg }
 					delete msgCopy['@type']
 					const valueBytes = Buffer.from(JSON.stringify(msgCopy), 'utf8')
-					return Any.create({ type_url: typeUrl, value: valueBytes })
+					return Any.create({ typeUrl, value: valueBytes })
 				})
 
 				const txBodyObj = TxBody.create({
 					messages,
 					memo: tx.body?.memo || '',
-					timeout_height: 0,
+					timeoutHeight: 0,
 				})
 				const bodyBytes = TxBody.encode(txBodyObj).finish()
 
@@ -1049,7 +1049,7 @@ const server = http.createServer(async (req, res) => {
 				const signerInfos = (tx.auth_info?.signer_infos || []).map((si: any) => {
 					const pubKey = si.public_key
 					const pubKeyAny = Any.create({
-						type_url: pubKey?.['@type'] || '',
+						typeUrl: pubKey?.['@type'] || '',
 						value: pubKey?.key ? Buffer.from(pubKey.key, 'base64') : Buffer.alloc(0),
 					})
 
@@ -1059,8 +1059,8 @@ const server = http.createServer(async (req, res) => {
 					})
 
 					return SignerInfo.create({
-						public_key: pubKeyAny,
-						mode_info: modeInfo,
+						publicKey: pubKeyAny,
+						modeInfo,
 						sequence: parseInt(si.sequence || '0', 10),
 					})
 				})
@@ -1071,11 +1071,11 @@ const server = http.createServer(async (req, res) => {
 
 				const fee = Fee.create({
 					amount: feeAmounts,
-					gas_limit: parseInt(tx.auth_info?.fee?.gas || '0', 10),
+					gasLimit: parseInt(tx.auth_info?.fee?.gas || '0', 10),
 				})
 
 				const authInfoObj = AuthInfo.create({
-					signer_infos: signerInfos,
+					signerInfos,
 					fee,
 				})
 				const authInfoBytes = AuthInfo.encode(authInfoObj).finish()
@@ -1087,8 +1087,8 @@ const server = http.createServer(async (req, res) => {
 				)
 
 				const txRawObj = TxRaw.create({
-					body_bytes: bodyBytes,
-					auth_info_bytes: authInfoBytes,
+					bodyBytes,
+					authInfoBytes,
 					signatures,
 				})
 				txBytes = Buffer.from(TxRaw.encode(txRawObj).finish())
