@@ -1,26 +1,22 @@
 #!/usr/bin/env npx tsx
 /**
- * Validator Refresh Script
+ * Validator Refresh Daemon (Event-Driven)
  *
- * Periodically fetches the full validator set from the chain via the
- * chain-query-service and upserts into the api.validators table.
+ * Listens for pg_notify('validator_refresh', operator_address) events emitted by
+ * SQL triggers (staking messages, finalize_block jailing events) and fetches
+ * updated validator data from the chain via gRPC.
  *
- * Handles:
- * - Genesis validators not seen in indexed transactions
- * - Accurate current token totals and status
- * - Jailed state changes
- * - Commission rate changes
- *
- * Also refreshes analytics materialized views on a separate cadence
- * (default: every 4 cycles = ~1 hour).
- *
- * Runs on a configurable interval (default: 15 minutes).
+ * Three concurrent loops:
+ * A. NOTIFY listener  -- event-driven, debounced batch fetch of affected validators
+ * B. MV refresh timer -- refreshes materialized views on a fixed cadence
+ * C. Full sync safety net -- full validator set fetch on startup + periodic interval
  *
  * Environment:
- *   DATABASE_URL         - PostgreSQL connection string
- *   CHAIN_QUERY_URL      - chain-query-service base URL (default: http://localhost:3001)
- *   REFRESH_INTERVAL_MS  - Refresh interval in milliseconds (default: 900000 = 15 min)
- *   MV_REFRESH_EVERY_N   - Refresh materialized views every N cycles (default: 4 = ~1 hour)
+ *   DATABASE_URL           - PostgreSQL connection string
+ *   CHAIN_QUERY_URL        - chain-query-service base URL (default: https://yaci-explorer-apis.fly.dev)
+ *   DEBOUNCE_MS            - Batch window for NOTIFY events (default: 2000)
+ *   MV_REFRESH_INTERVAL_MS - Materialized view refresh interval (default: 900000 = 15 min)
+ *   FULL_SYNC_INTERVAL_MS  - Full validator sync interval (default: 21600000 = 6 hours)
  */
 
 import pg from 'pg'
@@ -28,8 +24,13 @@ const { Pool } = pg
 
 const DATABASE_URL = process.env.DATABASE_URL || 'postgres://postgres:bOqwmcryOQcdmrO@localhost:15432/postgres?sslmode=disable'
 const CHAIN_QUERY_URL = process.env.CHAIN_QUERY_URL || 'https://yaci-explorer-apis.fly.dev'
-const REFRESH_INTERVAL_MS = parseInt(process.env.REFRESH_INTERVAL_MS || '900000', 10)
-const MV_REFRESH_EVERY_N = parseInt(process.env.MV_REFRESH_EVERY_N || '4', 10)
+const DEBOUNCE_MS = parseInt(process.env.DEBOUNCE_MS || '2000', 10)
+const MV_REFRESH_INTERVAL_MS = parseInt(process.env.MV_REFRESH_INTERVAL_MS || '900000', 10)
+const FULL_SYNC_INTERVAL_MS = parseInt(process.env.FULL_SYNC_INTERVAL_MS || '21600000', 10)
+
+// ============================================================================
+// Shared helpers
+// ============================================================================
 
 /** Maps gRPC status enum to DB status string */
 function mapStatus(status: number | string): string {
@@ -46,50 +47,19 @@ function mapStatus(status: number | string): string {
 	return statusMap[String(status)] || 'BOND_STATUS_UNSPECIFIED'
 }
 
-/** Fetches validators from chain-query-service */
-async function fetchValidators(): Promise<any[]> {
-	const controller = new AbortController()
-	const timeoutId = setTimeout(() => controller.abort(), 30000)
-
-	try {
-		const response = await fetch(`${CHAIN_QUERY_URL}/chain/staking/validators`, {
-			signal: controller.signal,
-		})
-		clearTimeout(timeoutId)
-
-		if (!response.ok) {
-			throw new Error(`Failed to fetch validators: ${response.status} ${response.statusText}`)
-		}
-
-		const data = await response.json()
-		return data.validators || []
-	} catch (err) {
-		clearTimeout(timeoutId)
-		throw err
-	}
+/** Converts Cosmos SDK Dec format (10^18) commission rates to decimal */
+function parseRate(val: string | undefined): string | null {
+	if (!val) return null
+	const n = Number(val)
+	if (n === 0) return '0'
+	if (n > 1) return (n / 1e18).toString()
+	return val
 }
 
-/** Fetches staking pool from chain-query-service */
-async function fetchStakingPool(): Promise<{ bondedTokens: string; notBondedTokens: string }> {
-	const controller = new AbortController()
-	const timeoutId = setTimeout(() => controller.abort(), 10000)
-
-	try {
-		const response = await fetch(`${CHAIN_QUERY_URL}/chain/staking/pool`, {
-			signal: controller.signal,
-		})
-		clearTimeout(timeoutId)
-
-		if (!response.ok) {
-			throw new Error(`Failed to fetch staking pool: ${response.status} ${response.statusText}`)
-		}
-
-		const data = await response.json()
-		return data.pool || { bondedTokens: '0', notBondedTokens: '0' }
-	} catch (err) {
-		clearTimeout(timeoutId)
-		throw err
-	}
+/** Parses numeric fields, defaulting to null on failure */
+function parseNum(val: string | undefined): string | null {
+	if (!val || val === '0') return val === '0' ? '0' : null
+	return val
 }
 
 /** Upserts a single validator into the DB */
@@ -100,21 +70,6 @@ async function upsertValidator(client: pg.PoolClient, validator: any): Promise<v
 	const status = mapStatus(validator.status)
 	const desc = validator.description || {}
 	const rates = validator.commission?.commissionRates || {}
-
-	// Parse numeric fields, defaulting to null on failure
-	const parseNum = (val: string | undefined): string | null => {
-		if (!val || val === '0') return val === '0' ? '0' : null
-		return val
-	}
-
-	/** Converts Cosmos SDK Dec format (10^18) commission rates to decimal */
-	const parseRate = (val: string | undefined): string | null => {
-		if (!val) return null
-		const n = Number(val)
-		if (n === 0) return '0'
-		if (n > 1) return (n / 1e18).toString()
-		return val
-	}
 
 	await client.query(
 		`INSERT INTO api.validators (
@@ -155,10 +110,257 @@ async function upsertValidator(client: pg.PoolClient, validator: any): Promise<v
 	)
 }
 
-/** Runs one refresh cycle */
+// ============================================================================
+// HTTP fetch helpers
+// ============================================================================
+
+/** Fetches all validators from chain-query-service */
+async function fetchValidators(): Promise<any[]> {
+	const controller = new AbortController()
+	const timeoutId = setTimeout(() => controller.abort(), 30000)
+
+	try {
+		const response = await fetch(`${CHAIN_QUERY_URL}/chain/staking/validators`, {
+			signal: controller.signal,
+		})
+		clearTimeout(timeoutId)
+
+		if (!response.ok) {
+			throw new Error(`Failed to fetch validators: ${response.status} ${response.statusText}`)
+		}
+
+		const data = await response.json()
+		return data.validators || []
+	} catch (err) {
+		clearTimeout(timeoutId)
+		throw err
+	}
+}
+
+/** Fetches a single validator from chain-query-service */
+async function fetchValidator(operatorAddress: string): Promise<any | null> {
+	const controller = new AbortController()
+	const timeoutId = setTimeout(() => controller.abort(), 10000)
+
+	try {
+		const response = await fetch(`${CHAIN_QUERY_URL}/chain/staking/validator/${operatorAddress}`, {
+			signal: controller.signal,
+		})
+		clearTimeout(timeoutId)
+
+		if (!response.ok) {
+			if (response.status === 500) {
+				// gRPC NotFound gets mapped to 500 by the chain-query-service
+				console.warn(`[ValidatorRefresh] Validator ${operatorAddress} not found on chain`)
+				return null
+			}
+			throw new Error(`Failed to fetch validator ${operatorAddress}: ${response.status}`)
+		}
+
+		const data = await response.json()
+		return data.validator || null
+	} catch (err) {
+		clearTimeout(timeoutId)
+		throw err
+	}
+}
+
+/** Fetches staking pool from chain-query-service */
+async function fetchStakingPool(): Promise<{ bondedTokens: string; notBondedTokens: string }> {
+	const controller = new AbortController()
+	const timeoutId = setTimeout(() => controller.abort(), 10000)
+
+	try {
+		const response = await fetch(`${CHAIN_QUERY_URL}/chain/staking/pool`, {
+			signal: controller.signal,
+		})
+		clearTimeout(timeoutId)
+
+		if (!response.ok) {
+			throw new Error(`Failed to fetch staking pool: ${response.status} ${response.statusText}`)
+		}
+
+		const data = await response.json()
+		return data.pool || { bondedTokens: '0', notBondedTokens: '0' }
+	} catch (err) {
+		clearTimeout(timeoutId)
+		throw err
+	}
+}
+
+// ============================================================================
+// A. NOTIFY Listener (event-driven, debounced)
+// ============================================================================
+
+let listenerClient: pg.PoolClient | null = null
+let reconnectTimeout: NodeJS.Timeout | null = null
+let debounceTimeout: NodeJS.Timeout | null = null
+const pendingAddresses = new Set<string>()
+
+async function processPendingBatch(pool: pg.Pool): Promise<void> {
+	if (pendingAddresses.size === 0) return
+
+	const batch = Array.from(pendingAddresses)
+	pendingAddresses.clear()
+
+	console.log(`[ValidatorRefresh] Processing batch of ${batch.length} validators: ${batch.join(', ')}`)
+
+	const client = await pool.connect()
+	let updated = 0
+	let errors = 0
+
+	try {
+		for (const addr of batch) {
+			try {
+				const validator = await fetchValidator(addr)
+				if (validator) {
+					await upsertValidator(client, validator)
+					updated++
+				}
+			} catch (err: any) {
+				errors++
+				console.error(`[ValidatorRefresh] Error refreshing ${addr}: ${err.message}`)
+			}
+		}
+	} finally {
+		client.release()
+	}
+
+	console.log(`[ValidatorRefresh] Batch done: ${updated} updated, ${errors} errors`)
+}
+
+function scheduleBatch(pool: pg.Pool): void {
+	if (debounceTimeout) return
+	debounceTimeout = setTimeout(async () => {
+		debounceTimeout = null
+		try {
+			await processPendingBatch(pool)
+		} catch (err: any) {
+			console.error(`[ValidatorRefresh] Batch processing failed: ${err.message}`)
+		}
+	}, DEBOUNCE_MS)
+}
+
+async function startNotifyListener(pool: pg.Pool): Promise<void> {
+	console.log(`[ValidatorRefresh] Starting NOTIFY listener (debounce: ${DEBOUNCE_MS}ms)`)
+
+	async function connect() {
+		try {
+			listenerClient = await pool.connect()
+			console.log('[ValidatorRefresh] Listening for validator_refresh notifications')
+
+			await listenerClient.query('LISTEN validator_refresh')
+
+			listenerClient.on('notification', (msg) => {
+				if (msg.channel === 'validator_refresh') {
+					const addr = msg.payload
+					if (!addr) return
+
+					pendingAddresses.add(addr)
+					scheduleBatch(pool)
+				}
+			})
+
+			listenerClient.on('error', (err) => {
+				console.error('[ValidatorRefresh] Listener connection error:', err.message)
+				scheduleReconnect()
+			})
+
+			listenerClient.on('end', () => {
+				console.log('[ValidatorRefresh] Listener connection ended')
+				scheduleReconnect()
+			})
+
+			console.log('[ValidatorRefresh] NOTIFY listener ready')
+		} catch (err) {
+			console.error('[ValidatorRefresh] Failed to start listener:', err)
+			scheduleReconnect()
+		}
+	}
+
+	function scheduleReconnect() {
+		if (reconnectTimeout) return
+		if (shuttingDown) return
+
+		listenerClient = null
+		console.log('[ValidatorRefresh] Reconnecting listener in 5 seconds...')
+		reconnectTimeout = setTimeout(() => {
+			reconnectTimeout = null
+			connect()
+		}, 5000)
+	}
+
+	await connect()
+}
+
+// ============================================================================
+// B. MV Refresh Timer
+// ============================================================================
+
+async function refreshMaterializedViews(pool: pg.Pool): Promise<void> {
+	const startTime = Date.now()
+	console.log(`[MVRefresh] Refreshing analytics views...`)
+
+	const views = [
+		'api.mv_daily_tx_stats',
+		'api.mv_hourly_tx_stats',
+		'api.mv_message_type_stats',
+		'api.mv_validator_delegator_counts',
+		'api.mv_daily_rewards',
+		'api.mv_validator_leaderboard',
+		'api.mv_chain_stats',
+		'api.mv_network_overview',
+		'api.mv_hourly_rewards',
+	]
+
+	const client = await pool.connect()
+	try {
+		for (const view of views) {
+			try {
+				await client.query(`REFRESH MATERIALIZED VIEW CONCURRENTLY ${view}`)
+			} catch (err: any) {
+				// View may not exist yet if migration hasn't run
+				console.warn(`[MVRefresh] Skipping ${view}: ${err.message}`)
+			}
+		}
+	} finally {
+		client.release()
+	}
+
+	const elapsed = Date.now() - startTime
+	console.log(`[MVRefresh] Done in ${elapsed}ms (${views.length} views)`)
+}
+
+async function startMVRefreshLoop(pool: pg.Pool): Promise<void> {
+	console.log(`[MVRefresh] Materialized view refresh every ${MV_REFRESH_INTERVAL_MS / 60000} min`)
+
+	// Initial refresh
+	try {
+		await refreshMaterializedViews(pool)
+	} catch (err: any) {
+		console.error(`[MVRefresh] Initial refresh failed: ${err.message}`)
+	}
+
+	// Periodic refresh
+	while (!shuttingDown) {
+		await new Promise(resolve => setTimeout(resolve, MV_REFRESH_INTERVAL_MS))
+		if (shuttingDown) break
+
+		try {
+			await refreshMaterializedViews(pool)
+		} catch (err: any) {
+			console.error(`[MVRefresh] Refresh failed: ${err.message}`)
+		}
+	}
+}
+
+// ============================================================================
+// C. Full Sync Safety Net
+// ============================================================================
+
 async function refreshValidators(pool: pg.Pool): Promise<void> {
 	const startTime = Date.now()
-	console.log(`[ValidatorRefresh] Starting refresh...`)
+	console.log(`[ValidatorRefresh] Full sync starting...`)
 
 	const [validators, pool_info] = await Promise.all([
 		fetchValidators(),
@@ -192,7 +394,6 @@ async function refreshValidators(pool: pg.Pool): Promise<void> {
 		}
 
 		// Mark validators in DB that are no longer on chain as UNBONDED
-		// These are "ghost" validators that were removed from chain state
 		const { rowCount: ghostCount } = await client.query(
 			`UPDATE api.validators
 			 SET status = 'BOND_STATUS_UNBONDED', jailed = true, updated_at = NOW()
@@ -213,71 +414,72 @@ async function refreshValidators(pool: pg.Pool): Promise<void> {
 	}
 
 	const elapsed = Date.now() - startTime
-	console.log(`[ValidatorRefresh] Done in ${elapsed}ms: ${updated} updated, ${errors} errors`)
+	console.log(`[ValidatorRefresh] Full sync done in ${elapsed}ms: ${updated} updated, ${errors} errors`)
 }
 
-/** Refreshes analytics materialized views concurrently */
-async function refreshMaterializedViews(pool: pg.Pool): Promise<void> {
-	const startTime = Date.now()
-	console.log(`[MVRefresh] Refreshing analytics views...`)
+async function startFullSyncLoop(pool: pg.Pool): Promise<void> {
+	console.log(`[ValidatorRefresh] Full sync every ${FULL_SYNC_INTERVAL_MS / 3600000}h`)
 
-	const client = await pool.connect()
-	try {
-		await client.query('REFRESH MATERIALIZED VIEW CONCURRENTLY api.mv_daily_tx_stats')
-		await client.query('REFRESH MATERIALIZED VIEW CONCURRENTLY api.mv_hourly_tx_stats')
-		await client.query('REFRESH MATERIALIZED VIEW CONCURRENTLY api.mv_message_type_stats')
-	} finally {
-		client.release()
-	}
-
-	const elapsed = Date.now() - startTime
-	console.log(`[MVRefresh] Done in ${elapsed}ms`)
-}
-
-/** Main loop */
-async function main() {
-	const pool = new Pool({ connectionString: DATABASE_URL })
-
-	console.log(`[ValidatorRefresh] Starting validator refresh service`)
-	console.log(`[ValidatorRefresh] Chain query URL: ${CHAIN_QUERY_URL}`)
-	console.log(`[ValidatorRefresh] Refresh interval: ${REFRESH_INTERVAL_MS}ms (${REFRESH_INTERVAL_MS / 60000} min)`)
-	console.log(`[MVRefresh] Materialized view refresh every ${MV_REFRESH_EVERY_N} cycles`)
-
-	let cycle = 0
-
-	// Run immediately on startup
+	// Initial full sync on startup
 	try {
 		await refreshValidators(pool)
 	} catch (err: any) {
-		console.error(`[ValidatorRefresh] Initial refresh failed: ${err.message}`)
+		console.error(`[ValidatorRefresh] Initial full sync failed: ${err.message}`)
 	}
 
-	try {
-		await refreshMaterializedViews(pool)
-	} catch (err: any) {
-		console.error(`[MVRefresh] Initial refresh failed: ${err.message}`)
-	}
-
-	// Then run on interval
-	while (true) {
-		await new Promise(resolve => setTimeout(resolve, REFRESH_INTERVAL_MS))
-		cycle++
+	// Periodic full sync
+	while (!shuttingDown) {
+		await new Promise(resolve => setTimeout(resolve, FULL_SYNC_INTERVAL_MS))
+		if (shuttingDown) break
 
 		try {
 			await refreshValidators(pool)
 		} catch (err: any) {
-			console.error(`[ValidatorRefresh] Refresh failed: ${err.message}`)
-		}
-
-		if (cycle % MV_REFRESH_EVERY_N === 0) {
-			try {
-				await refreshMaterializedViews(pool)
-			} catch (err: any) {
-				console.error(`[MVRefresh] Refresh failed: ${err.message}`)
-			}
+			console.error(`[ValidatorRefresh] Full sync failed: ${err.message}`)
 		}
 	}
 }
+
+// ============================================================================
+// Main + shutdown
+// ============================================================================
+
+let shuttingDown = false
+
+async function main() {
+	const pool = new Pool({ connectionString: DATABASE_URL })
+
+	console.log(`[ValidatorRefresh] Starting event-driven validator refresh service`)
+	console.log(`[ValidatorRefresh] Chain query URL: ${CHAIN_QUERY_URL}`)
+	console.log(`[ValidatorRefresh] Debounce: ${DEBOUNCE_MS}ms`)
+
+	// Start all three loops concurrently
+	await Promise.all([
+		startNotifyListener(pool),
+		startFullSyncLoop(pool),
+		startMVRefreshLoop(pool),
+	])
+}
+
+async function shutdown() {
+	if (shuttingDown) return
+	shuttingDown = true
+	console.log('\n[ValidatorRefresh] Shutting down...')
+
+	if (debounceTimeout) {
+		clearTimeout(debounceTimeout)
+	}
+	if (reconnectTimeout) {
+		clearTimeout(reconnectTimeout)
+	}
+	if (listenerClient) {
+		listenerClient.release()
+	}
+	process.exit(0)
+}
+
+process.on('SIGINT', shutdown)
+process.on('SIGTERM', shutdown)
 
 main().catch(err => {
 	console.error('[ValidatorRefresh] Fatal error:', err)
