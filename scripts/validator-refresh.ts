@@ -301,16 +301,18 @@ async function refreshMaterializedViews(pool: pg.Pool): Promise<void> {
 	const startTime = Date.now()
 	console.log(`[MVRefresh] Refreshing analytics views...`)
 
+	// Only refresh MVs that are NOT replaced by trigger-updated tables.
+	// After migration 055, the following are real-time and no longer need periodic refresh:
+	//   mv_daily_tx_stats -> rt_daily_tx_stats
+	//   mv_hourly_tx_stats -> rt_hourly_tx_stats
+	//   mv_message_type_stats -> rt_message_type_stats
+	//   mv_chain_stats -> rt_chain_stats
+	//   mv_hourly_rewards -> rt_hourly_rewards
+	//   mv_network_overview -> get_network_overview() reads live tables
 	const views = [
-		'api.mv_daily_tx_stats',
-		'api.mv_hourly_tx_stats',
-		'api.mv_message_type_stats',
 		'api.mv_validator_delegator_counts',
 		'api.mv_daily_rewards',
 		'api.mv_validator_leaderboard',
-		'api.mv_chain_stats',
-		'api.mv_network_overview',
-		'api.mv_hourly_rewards',
 	]
 
 	const client = await pool.connect()
@@ -323,12 +325,33 @@ async function refreshMaterializedViews(pool: pg.Pool): Promise<void> {
 				console.warn(`[MVRefresh] Skipping ${view}: ${err.message}`)
 			}
 		}
+
+		// Reconcile rt_chain_stats.unique_addresses from the expensive DISTINCT query
+		// This is too costly for triggers but fine at 15-minute intervals
+		try {
+			await client.query(
+				`UPDATE api.rt_chain_stats SET unique_addresses = (
+					SELECT COUNT(*) FROM (
+						SELECT DISTINCT sender AS addr FROM api.messages_main WHERE sender IS NOT NULL
+						UNION
+						SELECT DISTINCT "from" AS addr FROM api.evm_transactions
+						UNION
+						SELECT DISTINCT "to" AS addr FROM api.evm_transactions WHERE "to" IS NOT NULL
+						UNION
+						SELECT DISTINCT unnest(mentions) AS addr FROM api.messages_main WHERE mentions IS NOT NULL
+					) all_addresses
+				), updated_at = NOW()`
+			)
+		} catch (err: any) {
+			// Table may not exist yet if migration 055 hasn't run
+			console.warn(`[MVRefresh] Skipping unique_addresses reconciliation: ${err.message}`)
+		}
 	} finally {
 		client.release()
 	}
 
 	const elapsed = Date.now() - startTime
-	console.log(`[MVRefresh] Done in ${elapsed}ms (${views.length} views)`)
+	console.log(`[MVRefresh] Done in ${elapsed}ms (${views.length} views + reconciliation)`)
 }
 
 async function startMVRefreshLoop(pool: pg.Pool): Promise<void> {
@@ -393,17 +416,34 @@ async function refreshValidators(pool: pg.Pool): Promise<void> {
 			}
 		}
 
-		// Mark validators in DB that are no longer on chain as UNBONDED
-		const { rowCount: ghostCount } = await client.query(
-			`UPDATE api.validators
-			 SET status = 'BOND_STATUS_UNBONDED', jailed = true, updated_at = NOW()
-			 WHERE status = 'BOND_STATUS_BONDED'
-			   AND operator_address NOT IN (SELECT unnest($1::text[]))`,
-			[Array.from(chainAddresses)]
-		)
-		if (ghostCount && ghostCount > 0) {
-			console.log(`[ValidatorRefresh] Marked ${ghostCount} ghost validators as unbonded`)
+		// Mark validators in DB that are no longer in chain response as UNBONDED.
+		// Do NOT set jailed=true here -- being absent from the active set does not
+		// mean jailed. Jailing is detected separately by block-signature analysis
+		// and finalize_block events.
+		if (chainAddresses.size === 0) {
+			console.warn(`[ValidatorRefresh] Chain returned 0 validators -- skipping ghost check to avoid mass-marking`)
+		} else {
+			const { rowCount: ghostCount } = await client.query(
+				`UPDATE api.validators
+				 SET status = 'BOND_STATUS_UNBONDED', updated_at = NOW()
+				 WHERE status = 'BOND_STATUS_BONDED'
+				   AND operator_address NOT IN (SELECT unnest($1::text[]))`,
+				[Array.from(chainAddresses)]
+			)
+			if (ghostCount && ghostCount > 0) {
+				console.warn(`[ValidatorRefresh] Marked ${ghostCount} validators as unbonded (absent from chain response)`)
+			}
 		}
+
+		// Fill in NULL consensus_address from the mapping table (populated by block
+		// signature extraction) so jailing detection can resolve addresses correctly
+		await client.query(
+			`UPDATE api.validators v
+			 SET consensus_address = vca.consensus_address, updated_at = NOW()
+			 FROM api.validator_consensus_addresses vca
+			 WHERE vca.operator_address = v.operator_address
+			   AND (v.consensus_address IS NULL OR v.consensus_address = '')`
+		)
 
 		await client.query('COMMIT')
 	} catch (err) {
