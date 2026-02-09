@@ -19,6 +19,19 @@
 BEGIN;
 
 -- ============================================================================
+-- 0. Update delegation_events CHECK constraint to allow UNJAIL
+-- ============================================================================
+
+ALTER TABLE api.delegation_events
+  DROP CONSTRAINT IF EXISTS delegation_events_event_type_check;
+
+ALTER TABLE api.delegation_events
+  ADD CONSTRAINT delegation_events_event_type_check
+  CHECK (event_type IN (
+    'DELEGATE', 'UNDELEGATE', 'REDELEGATE', 'CREATE_VALIDATOR', 'EDIT_VALIDATOR', 'UNJAIL'
+  ));
+
+-- ============================================================================
 -- A. Redefine detect_staking_from_message() with MsgUnjail support
 -- ============================================================================
 
@@ -84,7 +97,7 @@ BEGIN
       amount, denom, tx_hash, height, timestamp
     ) VALUES (
       'DELEGATE', del_addr, val_addr,
-      COALESCE(raw_data->'amount'->>'amount', raw_data->'coin'->>'amount'),
+      NULLIF(COALESCE(raw_data->'amount'->>'amount', raw_data->'coin'->>'amount'), '')::NUMERIC,
       COALESCE(raw_data->'amount'->>'denom', raw_data->'coin'->>'denom'),
       NEW.id, tx_record.height, tx_record.timestamp
     )
@@ -99,7 +112,7 @@ BEGIN
       amount, denom, tx_hash, height, timestamp
     ) VALUES (
       'UNDELEGATE', del_addr, val_addr,
-      COALESCE(raw_data->'amount'->>'amount', raw_data->'coin'->>'amount'),
+      NULLIF(COALESCE(raw_data->'amount'->>'amount', raw_data->'coin'->>'amount'), '')::NUMERIC,
       COALESCE(raw_data->'amount'->>'denom', raw_data->'coin'->>'denom'),
       NEW.id, tx_record.height, tx_record.timestamp
     )
@@ -119,7 +132,7 @@ BEGIN
     ) VALUES (
       'REDELEGATE', del_addr,
       dst_addr, src_addr,
-      COALESCE(raw_data->'amount'->>'amount', raw_data->'coin'->>'amount'),
+      NULLIF(COALESCE(raw_data->'amount'->>'amount', raw_data->'coin'->>'amount'), '')::NUMERIC,
       COALESCE(raw_data->'amount'->>'denom', raw_data->'coin'->>'denom'),
       NEW.id, tx_record.height, tx_record.timestamp
     )
@@ -140,11 +153,11 @@ BEGIN
       amount, denom, tx_hash, height, timestamp
     ) VALUES (
       'CREATE_VALIDATOR', del_addr, val_addr,
-      COALESCE(
+      NULLIF(COALESCE(
         raw_data->'value'->>'amount',
         raw_data->'selfDelegation'->>'amount',
         raw_data->'self_delegation'->>'amount'
-      ),
+      ), '')::NUMERIC,
       COALESCE(
         raw_data->'value'->>'denom',
         raw_data->'selfDelegation'->>'denom',
