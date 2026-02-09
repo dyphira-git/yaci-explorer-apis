@@ -218,10 +218,16 @@ END $$;
 -- ============================================================================
 
 -- republic-validator (val0): pubkey from node status
-SELECT api.register_validator_consensus_address(
-  'raivaloper1a6xl9lpxyv5e4gujfx7qslef9496mhwtpk9lh6',
-  'fiHxSVPIdcfrAmNaTwRrU09DbK+II97I1m1QnVEneCw='
-);
+-- Only runs if the validator exists in the database (skips in CI dry-run)
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM api.validators WHERE operator_address = 'raivaloper1a6xl9lpxyv5e4gujfx7qslef9496mhwtpk9lh6') THEN
+    PERFORM api.register_validator_consensus_address(
+      'raivaloper1a6xl9lpxyv5e4gujfx7qslef9496mhwtpk9lh6',
+      'fiHxSVPIdcfrAmNaTwRrU09DbK+II97I1m1QnVEneCw='
+    );
+  END IF;
+END $$;
 
 -- ============================================================================
 -- 5. Cross-reference: propagate operator_address between entries
