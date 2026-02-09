@@ -10,6 +10,7 @@
  * - GET /chain/spendable/:address - Get spendable balances
  * - GET /chain/supply/:denom - Get supply of a denom
  * - GET /chain/staking/validators - Get all validators
+ * - GET /chain/staking/validator/:address - Get single validator by operator address
  * - GET /chain/staking/pool - Get staking pool info
  * - GET /chain/auth/account/:address - Get account info (for signing)
  * - POST /chain/tx/broadcast - Broadcast signed transaction
@@ -546,6 +547,11 @@ class ChainQueryClient {
 				requestType: 'cosmos.staking.v1beta1.QueryValidatorsRequest',
 				responseType: 'cosmos.staking.v1beta1.QueryValidatorsResponse',
 			},
+			Validator: {
+				path: '/cosmos.staking.v1beta1.Query/Validator',
+				requestType: 'cosmos.staking.v1beta1.QueryValidatorRequest',
+				responseType: 'cosmos.staking.v1beta1.QueryValidatorResponse',
+			},
 			Pool: {
 				path: '/cosmos.staking.v1beta1.Query/Pool',
 				requestType: 'cosmos.staking.v1beta1.QueryPoolRequest',
@@ -597,6 +603,53 @@ class ChainQueryClient {
 						unbondingHeight: v.unbondingHeight || v.unbonding_height || '0',
 					}))
 					resolve({ validators })
+				}
+			)
+		})
+	}
+
+	/** Fetches a single validator by operator address */
+	async getValidator(validatorAddr: string): Promise<any> {
+		const stub = this.getStub('cosmos.staking.v1beta1.Query', this.stakingMethods())
+
+		return new Promise((resolve, reject) => {
+			stub.Validator(
+				{ validator_addr: validatorAddr },
+				(err: Error | null, response: any) => {
+					if (err) {
+						reject(err)
+						return
+					}
+					const v = response.validator
+					if (!v) {
+						resolve({ validator: null })
+						return
+					}
+					resolve({
+						validator: {
+							operatorAddress: v.operatorAddress || v.operator_address || '',
+							jailed: v.jailed || false,
+							status: v.status,
+							tokens: v.tokens || '0',
+							delegatorShares: v.delegatorShares || v.delegator_shares || '0',
+							description: {
+								moniker: v.description?.moniker || '',
+								identity: v.description?.identity || '',
+								website: v.description?.website || '',
+								securityContact: v.description?.securityContact || v.description?.security_contact || '',
+								details: v.description?.details || '',
+							},
+							commission: {
+								commissionRates: {
+									rate: v.commission?.commissionRates?.rate || v.commission?.commission_rates?.rate || '0',
+									maxRate: v.commission?.commissionRates?.maxRate || v.commission?.commission_rates?.max_rate || '0',
+									maxChangeRate: v.commission?.commissionRates?.maxChangeRate || v.commission?.commission_rates?.max_change_rate || '0',
+								},
+							},
+							minSelfDelegation: v.minSelfDelegation || v.min_self_delegation || '0',
+							unbondingHeight: v.unbondingHeight || v.unbonding_height || '0',
+						},
+					})
 				}
 			)
 		})
@@ -878,6 +931,11 @@ const routes: Array<{ pattern: RegExp; handler: RouteHandler }> = [
 		pattern: /^\/chain\/staking\/validators$/,
 		handler: async (_params, query) => client.getValidators(query.get('status') || undefined),
 	},
+	// GET /chain/staking/validator/:address
+	{
+		pattern: /^\/chain\/staking\/validator\/([a-zA-Z0-9]+)$/,
+		handler: async (params) => client.getValidator(params.validatorAddr),
+	},
 	// GET /chain/staking/pool
 	{
 		pattern: /^\/chain\/staking\/pool$/,
@@ -1067,6 +1125,7 @@ const server = http.createServer(async (req, res) => {
 			if (url.pathname.includes('/balances/')) params.address = match[1]
 			else if (url.pathname.includes('/spendable/')) params.address = match[1]
 			else if (url.pathname.includes('/supply/')) params.denom = match[1]
+			else if (url.pathname.match(/\/staking\/validator\//)) params.validatorAddr = match[1]
 			else if (url.pathname.includes('/auth/account/')) params.address = match[1]
 			else if (url.pathname.includes('/slashing/signing_info/')) params.consAddress = match[1]
 
@@ -1091,6 +1150,7 @@ const server = http.createServer(async (req, res) => {
 		'GET  /chain/spendable/:address',
 		'GET  /chain/supply/:denom',
 		'GET  /chain/staking/validators?status=BOND_STATUS_BONDED',
+		'GET  /chain/staking/validator/:address',
 		'GET  /chain/staking/pool',
 		'GET  /chain/auth/account/:address',
 		'GET  /chain/slashing/params',
@@ -1111,6 +1171,7 @@ server.listen(PORT, () => {
 	console.log(`  GET  /chain/spendable/:address`)
 	console.log(`  GET  /chain/supply/:denom`)
 	console.log(`  GET  /chain/staking/validators`)
+	console.log(`  GET  /chain/staking/validator/:address`)
 	console.log(`  GET  /chain/staking/pool`)
 	console.log(`  GET  /chain/auth/account/:address`)
 	console.log(`  GET  /chain/slashing/params`)
