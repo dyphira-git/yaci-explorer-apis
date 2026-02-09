@@ -261,7 +261,8 @@ CREATE TRIGGER trg_rt_message_type_stats
   EXECUTE FUNCTION api.trg_rt_message_type_stats();
 
 -- Backward-compatible view with computed percentage
-CREATE OR REPLACE VIEW api.message_type_stats AS
+DROP VIEW IF EXISTS api.message_type_stats;
+CREATE VIEW api.message_type_stats AS
 SELECT
   message_type,
   count,
