@@ -30,35 +30,60 @@ async function run() {
 	await client.query("SET statement_timeout = '30min'")
 
 	try {
-		console.log("[backfill-rewards] Step 1/4: Truncating validator_rewards...")
-		await client.query("TRUNCATE api.validator_rewards")
-		console.log("[backfill-rewards] Truncated.")
-
-		console.log("[backfill-rewards] Step 2/4: Re-extracting from finalize_block_events (this may take several minutes)...")
-		const insertResult = await client.query(`
-			INSERT INTO api.validator_rewards (height, validator_address, rewards, commission)
-			SELECT
-				f.height,
-				f.attributes->>'validator' as validator_address,
-				SUM(CASE WHEN f.event_type = 'rewards' THEN
-					COALESCE(
-						NULLIF(regexp_replace(f.attributes->>'amount', '[^0-9.]', '', 'g'), '')::NUMERIC,
-						0
-					)
-				ELSE 0 END) as rewards,
-				SUM(CASE WHEN f.event_type = 'commission' THEN
-					COALESCE(
-						NULLIF(regexp_replace(f.attributes->>'amount', '[^0-9.]', '', 'g'), '')::NUMERIC,
-						0
-					)
-				ELSE 0 END) as commission
-			FROM api.finalize_block_events f
-			WHERE f.event_type IN ('rewards', 'commission')
-				AND f.attributes->>'validator' IS NOT NULL
-				AND f.attributes->>'validator' != ''
-			GROUP BY f.height, f.attributes->>'validator'
+		// Find the gap: backfill only heights not already covered by the live trigger
+		const gapResult = await client.query(`
+			SELECT MIN(height) AS min_height, MAX(height) AS max_height
+			FROM api.finalize_block_events
+			WHERE event_type IN ('rewards', 'commission')
 		`)
-		console.log(`[backfill-rewards] Inserted ${insertResult.rowCount} rows into validator_rewards.`)
+		const sourceMin = parseInt(gapResult.rows[0].min_height, 10)
+		const sourceMax = parseInt(gapResult.rows[0].max_height, 10)
+
+		const existingResult = await client.query(`
+			SELECT MIN(height) AS min_height, MAX(height) AS max_height, COUNT(*) AS cnt
+			FROM api.validator_rewards
+		`)
+		const existingMin = parseInt(existingResult.rows[0].min_height, 10) || sourceMax
+		const existingCount = parseInt(existingResult.rows[0].cnt, 10)
+
+		console.log(`[backfill-rewards] Source events: heights ${sourceMin} - ${sourceMax}`)
+		console.log(`[backfill-rewards] Existing rewards: ${existingCount} rows, min height ${existingMin}`)
+		console.log(`[backfill-rewards] Backfilling heights ${sourceMin} - ${existingMin - 1} in batches...`)
+
+		const BATCH_SIZE = 2000
+		let totalInserted = 0
+
+		for (let h = sourceMin; h < existingMin; h += BATCH_SIZE) {
+			const upper = Math.min(h + BATCH_SIZE, existingMin)
+			const insertResult = await client.query(`
+				INSERT INTO api.validator_rewards (height, validator_address, rewards, commission)
+				SELECT
+					f.height,
+					f.attributes->>'validator' as validator_address,
+					SUM(CASE WHEN f.event_type = 'rewards' THEN
+						COALESCE(
+							NULLIF(regexp_replace(f.attributes->>'amount', '[^0-9.]', '', 'g'), '')::NUMERIC,
+							0
+						)
+					ELSE 0 END) as rewards,
+					SUM(CASE WHEN f.event_type = 'commission' THEN
+						COALESCE(
+							NULLIF(regexp_replace(f.attributes->>'amount', '[^0-9.]', '', 'g'), '')::NUMERIC,
+							0
+						)
+					ELSE 0 END) as commission
+				FROM api.finalize_block_events f
+				WHERE f.event_type IN ('rewards', 'commission')
+					AND f.attributes->>'validator' IS NOT NULL
+					AND f.attributes->>'validator' != ''
+					AND f.height >= $1 AND f.height < $2
+				GROUP BY f.height, f.attributes->>'validator'
+				ON CONFLICT (height, validator_address) DO NOTHING
+			`, [h, upper])
+			totalInserted += insertResult.rowCount || 0
+			console.log(`[backfill-rewards] Batch ${h}-${upper - 1}: ${insertResult.rowCount} rows (total: ${totalInserted})`)
+		}
+		console.log(`[backfill-rewards] Backfill complete: ${totalInserted} rows inserted.`)
 
 		console.log("[backfill-rewards] Step 3/4: Rebuilding rt_hourly_rewards...")
 		await client.query("TRUNCATE api.rt_hourly_rewards")
