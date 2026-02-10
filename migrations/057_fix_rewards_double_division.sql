@@ -7,18 +7,13 @@
 -- Solution: Store raw base units (like validators.tokens does) and let the
 -- frontend handle the single conversion to display units.
 --
--- Steps:
---   1. Fix the trigger function (remove / 1e18)
---   2. Truncate + re-backfill validator_rewards from finalize_block_events
---   3. Truncate + rebuild rt_hourly_rewards from corrected data
---   4. Refresh mv_daily_rewards materialized view
+-- NOTE: This migration only updates the trigger function. The existing data
+-- backfill (8M+ rows) must be run separately via:
+--   npx tsx scripts/backfill-rewards.ts
 
 BEGIN;
 
--- ============================================================================
--- 1. Fix extract_rewards_from_events() - remove / 1e18
--- ============================================================================
-
+-- Fix extract_rewards_from_events() - remove / 1e18
 CREATE OR REPLACE FUNCTION api.extract_rewards_from_events()
 RETURNS TRIGGER AS $$
 DECLARE
@@ -92,66 +87,5 @@ BEGIN
   RETURN NEW;
 END;
 $$ LANGUAGE plpgsql;
-
--- ============================================================================
--- 2. Truncate + re-backfill validator_rewards from finalize_block_events
--- ============================================================================
-
-TRUNCATE api.validator_rewards;
-
-INSERT INTO api.validator_rewards (height, validator_address, rewards, commission)
-SELECT
-  f.height,
-  f.attributes->>'validator' as validator_address,
-  SUM(CASE WHEN f.event_type = 'rewards' THEN
-    COALESCE(
-      NULLIF(regexp_replace(f.attributes->>'amount', '[^0-9.]', '', 'g'), '')::NUMERIC,
-      0
-    )
-  ELSE 0 END) as rewards,
-  SUM(CASE WHEN f.event_type = 'commission' THEN
-    COALESCE(
-      NULLIF(regexp_replace(f.attributes->>'amount', '[^0-9.]', '', 'g'), '')::NUMERIC,
-      0
-    )
-  ELSE 0 END) as commission
-FROM api.finalize_block_events f
-WHERE f.event_type IN ('rewards', 'commission')
-  AND f.attributes->>'validator' IS NOT NULL
-  AND f.attributes->>'validator' != ''
-GROUP BY f.height, f.attributes->>'validator';
-
--- ============================================================================
--- 3. Truncate + rebuild rt_hourly_rewards from corrected validator_rewards
--- ============================================================================
-
-TRUNCATE api.rt_hourly_rewards;
-
-INSERT INTO api.rt_hourly_rewards (hour, rewards, commission)
-SELECT
-  date_trunc('hour', (b.data->'block'->'header'->>'time')::timestamptz) AS hour,
-  SUM(COALESCE(vr.rewards, 0)) AS rewards,
-  SUM(COALESCE(vr.commission, 0)) AS commission
-FROM api.validator_rewards vr
-JOIN api.blocks_raw b ON b.id = vr.height
-WHERE (b.data->'block'->'header'->>'time')::timestamptz > NOW() - INTERVAL '48 hours'
-GROUP BY date_trunc('hour', (b.data->'block'->'header'->>'time')::timestamptz)
-ON CONFLICT (hour) DO UPDATE SET
-  rewards = EXCLUDED.rewards,
-  commission = EXCLUDED.commission;
-
--- ============================================================================
--- 4. Refresh mv_daily_rewards materialized view
--- ============================================================================
-
-DO $$
-BEGIN
-  IF EXISTS (SELECT 1 FROM pg_matviews WHERE schemaname = 'api' AND matviewname = 'mv_daily_rewards') THEN
-    REFRESH MATERIALIZED VIEW api.mv_daily_rewards;
-  END IF;
-  IF EXISTS (SELECT 1 FROM pg_matviews WHERE schemaname = 'api' AND matviewname = 'mv_validator_leaderboard') THEN
-    REFRESH MATERIALIZED VIEW api.mv_validator_leaderboard;
-  END IF;
-END $$;
 
 COMMIT;
