@@ -244,7 +244,8 @@ async function processBatch(pool: pg.Pool, root: protobuf.Root): Promise<number>
 				[tx_id]
 			)
 
-			// Try to enrich with response data if available
+			// Enrich with response data if available (gas_used, status, logs)
+			let decodedLogs: DecodedLog[] = []
 			if (responseQuery.rows.length > 0 && responseQuery.rows[0].response_data) {
 				const responseHex = responseQuery.rows[0].response_data
 				const decodedResponse = await decodeTxResponse(responseHex, root)
@@ -252,58 +253,16 @@ async function processBatch(pool: pg.Pool, root: protobuf.Root): Promise<number>
 				if (decodedResponse) {
 					decoded.gas_used = decodedResponse.gasUsed
 					decoded.status = decodedResponse.vmError ? 0 : 1
-
-					// Process logs if we have response data
-					for (const log of decodedResponse.logs) {
-						log.tx_id = tx_id
-						await client.query(
-							`INSERT INTO api.evm_logs (tx_id, log_index, address, topics, data)
-							 VALUES ($1, $2, $3, $4, $5)
-							 ON CONFLICT (tx_id, log_index) DO NOTHING`,
-							[log.tx_id, log.log_index, log.address, log.topics, log.data]
-						)
-
-						const TRANSFER_SIG = '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef'
-						if (log.topics[0] === TRANSFER_SIG && log.topics.length >= 3) {
-							const fromAddr = '0x' + log.topics[1].slice(26)
-							const toAddr = '0x' + log.topics[2].slice(26)
-							const value = log.data || '0x0'
-
-							await client.query(
-								`INSERT INTO api.evm_token_transfers (tx_id, log_index, token_address, from_address, to_address, value)
-								 VALUES ($1, $2, $3, $4, $5, $6)
-								 ON CONFLICT (tx_id, log_index) DO NOTHING`,
-								[tx_id, log.log_index, log.address, fromAddr, toAddr, value]
-							)
-
-							// Insert token with metadata if RPC is available
-							const tokenMetadata = await fetchTokenMetadata(log.address)
-							await client.query(
-								`INSERT INTO api.evm_tokens (address, type, name, symbol, decimals, first_seen_tx, first_seen_height)
-								 VALUES ($1, 'ERC20', $2, $3, $4, $5, $6)
-								 ON CONFLICT (address) DO UPDATE SET
-								   name = COALESCE(api.evm_tokens.name, EXCLUDED.name),
-								   symbol = COALESCE(api.evm_tokens.symbol, EXCLUDED.symbol),
-								   decimals = COALESCE(api.evm_tokens.decimals, EXCLUDED.decimals)`,
-								[log.address, tokenMetadata.name, tokenMetadata.symbol, tokenMetadata.decimals, tx_id, height]
-							)
-						}
-					}
+					decodedLogs = decodedResponse.logs
 				}
 			}
 
 			// Detect contract deployment (to === null)
+			let contractAddress: string | null = null
+			let bytecodeHash: string | null = null
 			if (decoded.to === null && decoded.status === 1) {
-				const contractAddress = computeContractAddress(decoded.from, decoded.nonce)
-				const bytecodeHash = decoded.data ? keccak256(decoded.data) : null
-
-				await client.query(
-					`INSERT INTO api.evm_contracts (address, creator, creation_tx, creation_height, bytecode_hash)
-					 VALUES ($1, $2, $3, $4, $5)
-					 ON CONFLICT (address) DO NOTHING`,
-					[contractAddress.toLowerCase(), decoded.from.toLowerCase(), tx_id, height, bytecodeHash]
-				)
-				console.log(`  Contract deployed: ${contractAddress}`)
+				contractAddress = computeContractAddress(decoded.from, decoded.nonce)
+				bytecodeHash = decoded.data ? keccak256(decoded.data) : null
 			}
 
 			// Lookup function signature if we have call data (skip for contract deployments)
@@ -316,7 +275,7 @@ async function processBatch(pool: pg.Pool, root: protobuf.Root): Promise<number>
 				}
 			}
 
-			// Always insert the transaction to prevent infinite loop
+			// Insert transaction FIRST (parent record for evm_logs FK)
 			await client.query(
 				`INSERT INTO api.evm_transactions (
 					tx_id, hash, "from", "to", nonce, gas_limit, gas_price,
@@ -344,10 +303,58 @@ async function processBatch(pool: pg.Pool, root: protobuf.Root): Promise<number>
 					decoded.function_signature,
 				]
 			)
+
+			// Insert contract record if this was a deployment
+			if (contractAddress) {
+				await client.query(
+					`INSERT INTO api.evm_contracts (address, creator, creation_tx, creation_height, bytecode_hash)
+					 VALUES ($1, $2, $3, $4, $5)
+					 ON CONFLICT (address) DO NOTHING`,
+					[contractAddress.toLowerCase(), decoded.from.toLowerCase(), tx_id, height, bytecodeHash]
+				)
+				console.log(`  Contract deployed: ${contractAddress}`)
+			}
+
+			// Insert logs and token transfers (evm_logs FK -> evm_transactions)
+			const TRANSFER_SIG = '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef'
+			for (const log of decodedLogs) {
+				log.tx_id = tx_id
+				await client.query(
+					`INSERT INTO api.evm_logs (tx_id, log_index, address, topics, data)
+					 VALUES ($1, $2, $3, $4, $5)
+					 ON CONFLICT (tx_id, log_index) DO NOTHING`,
+					[log.tx_id, log.log_index, log.address, log.topics, log.data]
+				)
+
+				if (log.topics[0] === TRANSFER_SIG && log.topics.length >= 3) {
+					const fromAddr = '0x' + log.topics[1].slice(26)
+					const toAddr = '0x' + log.topics[2].slice(26)
+					const value = log.data || '0x0'
+
+					// Insert token FIRST (evm_token_transfers has FK to evm_tokens.address)
+					const tokenMetadata = await fetchTokenMetadata(log.address)
+					await client.query(
+						`INSERT INTO api.evm_tokens (address, type, name, symbol, decimals, first_seen_tx, first_seen_height)
+						 VALUES ($1, 'ERC20', $2, $3, $4, $5, $6)
+						 ON CONFLICT (address) DO UPDATE SET
+						   name = COALESCE(api.evm_tokens.name, EXCLUDED.name),
+						   symbol = COALESCE(api.evm_tokens.symbol, EXCLUDED.symbol),
+						   decimals = COALESCE(api.evm_tokens.decimals, EXCLUDED.decimals)`,
+						[log.address, tokenMetadata.name, tokenMetadata.symbol, tokenMetadata.decimals, tx_id, height]
+					)
+
+					await client.query(
+						`INSERT INTO api.evm_token_transfers (tx_id, log_index, token_address, from_address, to_address, value)
+						 VALUES ($1, $2, $3, $4, $5, $6)
+						 ON CONFLICT (tx_id, log_index) DO NOTHING`,
+						[tx_id, log.log_index, log.address, fromAddr, toAddr, value]
+					)
+				}
+			}
 		}
 
 		await client.query('COMMIT')
-		console.log(`✓ Decoded ${pending.rows.length} transactions`)
+		console.log(`Decoded ${pending.rows.length} transactions`)
 		return pending.rows.length
 	} catch (err) {
 		await client.query('ROLLBACK')

@@ -9,3 +9,5 @@ CLAUDE.md
 .claude/
 MIGRATION_PLAN.md
 TODO.md
+.serena/
+*.png

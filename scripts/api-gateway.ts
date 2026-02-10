@@ -45,17 +45,18 @@ interface CacheTier {
 }
 
 const CACHE_TIERS: Record<string, CacheTier> = {
-	// Analytics / materialized view endpoints - data refreshes every ~15 min
-	'/rpc/get_network_overview': { gatewayTtl: 60_000, maxAge: 30, staleWhileRevalidate: 60 },
-	'/rpc/get_hourly_rewards': { gatewayTtl: 60_000, maxAge: 30, staleWhileRevalidate: 60 },
-	'/rpc/get_validators_paginated': { gatewayTtl: 30_000, maxAge: 15, staleWhileRevalidate: 30 },
+	// Trigger-updated endpoints - data is near-real-time at DB level
+	'/rpc/get_network_overview': { gatewayTtl: 10_000, maxAge: 5, staleWhileRevalidate: 10 },
+	'/rpc/get_hourly_rewards': { gatewayTtl: 30_000, maxAge: 15, staleWhileRevalidate: 30 },
+	'/rpc/get_validators_paginated': { gatewayTtl: 10_000, maxAge: 5, staleWhileRevalidate: 10 },
 	'/rpc/get_validator_performance': { gatewayTtl: 30_000, maxAge: 15, staleWhileRevalidate: 30 },
 	'/rpc/get_validator_events_summary': { gatewayTtl: 30_000, maxAge: 15, staleWhileRevalidate: 30 },
-	// Materialized view tables accessed directly
+	// Remaining materialized views (still on 15-min refresh)
 	'/mv_': { gatewayTtl: 60_000, maxAge: 30, staleWhileRevalidate: 60 },
-	'/chain_stats': { gatewayTtl: 60_000, maxAge: 30, staleWhileRevalidate: 60 },
-	'/validator_stats': { gatewayTtl: 30_000, maxAge: 15, staleWhileRevalidate: 30 },
-	'/validators': { gatewayTtl: 30_000, maxAge: 15, staleWhileRevalidate: 30 },
+	// Trigger-updated chain stats + validator tables
+	'/chain_stats': { gatewayTtl: 10_000, maxAge: 5, staleWhileRevalidate: 10 },
+	'/validator_stats': { gatewayTtl: 10_000, maxAge: 5, staleWhileRevalidate: 10 },
+	'/validators': { gatewayTtl: 10_000, maxAge: 5, staleWhileRevalidate: 10 },
 	// Chain gRPC proxy - live data, short cache
 	'/chain/': { gatewayTtl: 6_000, maxAge: 3, staleWhileRevalidate: 6 },
 	// Default for other PostgREST endpoints (blocks, transactions, etc.)
