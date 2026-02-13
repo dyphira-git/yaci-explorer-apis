@@ -288,6 +288,12 @@ BEGIN
 END;
 $$;
 
-GRANT EXECUTE ON FUNCTION api.refresh_rt_chain_stats() TO postgres;
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'postgres') THEN
+    EXECUTE 'GRANT EXECUTE ON FUNCTION api.refresh_rt_chain_stats() TO postgres';
+  END IF;
+END
+$$;
 
 COMMIT;
