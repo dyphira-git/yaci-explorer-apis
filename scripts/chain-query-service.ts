@@ -423,9 +423,11 @@ class ChainQueryClient {
 		}
 	}
 
-	// Create a stub for a specific service
+	// Create a stub for a specific service.
+	// Cache key includes method names so different method sets for the same
+	// service each get their own stub (e.g. bank AllBalances vs SupplyOf).
 	private getStub(service: string, methods: Record<string, { path: string; requestType: string; responseType: string }>): any {
-		const cacheKey = service
+		const cacheKey = `${service}:${Object.keys(methods).sort().join(',')}`
 		if (this.stubs.has(cacheKey)) {
 			return this.stubs.get(cacheKey)
 		}
