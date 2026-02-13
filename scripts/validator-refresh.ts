@@ -317,42 +317,50 @@ async function refreshMaterializedViews(pool: pg.Pool): Promise<void> {
 
 	const client = await pool.connect()
 	try {
-		for (const view of views) {
-			try {
-				await client.query(`REFRESH MATERIALIZED VIEW CONCURRENTLY ${view}`)
-			} catch (err: any) {
-				// View may not exist yet if migration hasn't run
-				console.warn(`[MVRefresh] Skipping ${view}: ${err.message}`)
+		// Advisory lock prevents concurrent MV refresh overlap (e.g. if a previous
+		// refresh is still running when the next interval fires)
+		await client.query("SELECT pg_advisory_lock(hashtext('mv_refresh'))")
+
+		try {
+			for (const view of views) {
+				try {
+					await client.query(`REFRESH MATERIALIZED VIEW CONCURRENTLY ${view}`)
+				} catch (err: any) {
+					// View may not exist yet if migration hasn't run
+					console.warn(`[MVRefresh] Skipping ${view}: ${err.message}`)
+				}
 			}
-		}
 
-		// Refresh chain stats (latest_block, total_transactions) since triggers were
-		// removed in migration 061 to prevent deadlocks under concurrent block inserts
-		try {
-			await client.query(`SELECT api.refresh_rt_chain_stats()`)
-		} catch (err: any) {
-			console.warn(`[MVRefresh] Skipping refresh_rt_chain_stats: ${err.message}`)
-		}
+			// Refresh chain stats (latest_block, total_transactions) since triggers were
+			// removed in migration 061 to prevent deadlocks under concurrent block inserts
+			try {
+				await client.query(`SELECT api.refresh_rt_chain_stats()`)
+			} catch (err: any) {
+				console.warn(`[MVRefresh] Skipping refresh_rt_chain_stats: ${err.message}`)
+			}
 
-		// Reconcile rt_chain_stats.unique_addresses from the expensive DISTINCT query
-		// This is too costly for triggers but fine at 15-minute intervals
-		try {
-			await client.query(
-				`UPDATE api.rt_chain_stats SET unique_addresses = (
-					SELECT COUNT(*) FROM (
-						SELECT DISTINCT sender AS addr FROM api.messages_main WHERE sender IS NOT NULL
-						UNION
-						SELECT DISTINCT "from" AS addr FROM api.evm_transactions
-						UNION
-						SELECT DISTINCT "to" AS addr FROM api.evm_transactions WHERE "to" IS NOT NULL
-						UNION
-						SELECT DISTINCT unnest(mentions) AS addr FROM api.messages_main WHERE mentions IS NOT NULL
-					) all_addresses
-				), updated_at = NOW()`
-			)
-		} catch (err: any) {
-			// Table may not exist yet if migration 055 hasn't run
-			console.warn(`[MVRefresh] Skipping unique_addresses reconciliation: ${err.message}`)
+			// Reconcile rt_chain_stats.unique_addresses from the expensive DISTINCT query
+			// This is too costly for triggers but fine at 15-minute intervals
+			try {
+				await client.query(
+					`UPDATE api.rt_chain_stats SET unique_addresses = (
+						SELECT COUNT(*) FROM (
+							SELECT DISTINCT sender AS addr FROM api.messages_main WHERE sender IS NOT NULL
+							UNION
+							SELECT DISTINCT "from" AS addr FROM api.evm_transactions
+							UNION
+							SELECT DISTINCT "to" AS addr FROM api.evm_transactions WHERE "to" IS NOT NULL
+							UNION
+							SELECT DISTINCT unnest(mentions) AS addr FROM api.messages_main WHERE mentions IS NOT NULL
+						) all_addresses
+					), updated_at = NOW()`
+				)
+			} catch (err: any) {
+				// Table may not exist yet if migration 055 hasn't run
+				console.warn(`[MVRefresh] Skipping unique_addresses reconciliation: ${err.message}`)
+			}
+		} finally {
+			await client.query("SELECT pg_advisory_unlock(hashtext('mv_refresh'))")
 		}
 	} finally {
 		client.release()
