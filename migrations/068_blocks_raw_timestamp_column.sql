@@ -1,9 +1,12 @@
 BEGIN;
 
--- Migration 068: Stored generated column for block timestamp on blocks_raw
+-- Migration 068: Block timestamp column on blocks_raw
 --
 -- Extracts (data->'block'->'header'->>'time')::timestamptz into a proper column
 -- so queries can use a B-tree index instead of JSONB extraction per row.
+--
+-- Uses a regular column + trigger + batched backfill instead of GENERATED STORED
+-- to avoid a full table rewrite (blocks_raw is ~4 GB, disk is tight).
 --
 -- Affected functions:
 --   get_blocks_paginated  -- date filtering in WHERE clause
@@ -11,9 +14,7 @@ BEGIN;
 --   trg_rt_daily_rewards  -- same
 
 -- ============================================================================
--- 1. Immutable helper for generated column (::timestamptz is STABLE, not
---    IMMUTABLE, because it depends on the TimeZone GUC. Cosmos block
---    timestamps are always RFC3339/UTC so we can safely mark this IMMUTABLE.)
+-- 1. Helper function (reusable by other migrations and triggers)
 -- ============================================================================
 
 CREATE OR REPLACE FUNCTION api.parse_block_time(data jsonb)
@@ -24,18 +25,68 @@ AS $$
 $$;
 
 -- ============================================================================
--- 2. Add stored generated column + descending index
+-- 2. Add plain column (no table rewrite, just catalog update)
 -- ============================================================================
 
 ALTER TABLE api.blocks_raw
-  ADD COLUMN IF NOT EXISTS block_time TIMESTAMPTZ
-  GENERATED ALWAYS AS (api.parse_block_time(data)) STORED;
+  ADD COLUMN IF NOT EXISTS block_time TIMESTAMPTZ;
+
+-- ============================================================================
+-- 3. Trigger: populate block_time on INSERT (before index creation so new
+--    rows arriving during backfill also get populated)
+-- ============================================================================
+
+CREATE OR REPLACE FUNCTION api.trg_set_block_time()
+RETURNS TRIGGER AS $$
+BEGIN
+  NEW.block_time := api.parse_block_time(NEW.data);
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trg_set_block_time ON api.blocks_raw;
+CREATE TRIGGER trg_set_block_time
+  BEFORE INSERT ON api.blocks_raw
+  FOR EACH ROW
+  EXECUTE FUNCTION api.trg_set_block_time();
+
+-- ============================================================================
+-- 4. Backfill existing rows in batches of 10,000 to avoid long locks
+-- ============================================================================
+
+DO $$
+DECLARE
+  batch_size INT := 10000;
+  updated INT;
+  total INT := 0;
+BEGIN
+  LOOP
+    UPDATE api.blocks_raw
+    SET block_time = api.parse_block_time(data)
+    WHERE id IN (
+      SELECT id FROM api.blocks_raw
+      WHERE block_time IS NULL
+      LIMIT batch_size
+    );
+    GET DIAGNOSTICS updated = ROW_COUNT;
+    total := total + updated;
+    EXIT WHEN updated = 0;
+    RAISE NOTICE 'Backfilled % rows (% total)', updated, total;
+    PERFORM pg_sleep(0.1);
+  END LOOP;
+  RAISE NOTICE 'block_time backfill complete: % rows', total;
+END;
+$$;
+
+-- ============================================================================
+-- 5. Index (after backfill so it's built once, not incrementally)
+-- ============================================================================
 
 CREATE INDEX IF NOT EXISTS idx_blocks_raw_block_time
   ON api.blocks_raw(block_time DESC);
 
 -- ============================================================================
--- 2. Update get_blocks_paginated to use the new column
+-- 6. Update get_blocks_paginated to use the new column
 -- ============================================================================
 
 CREATE OR REPLACE FUNCTION api.get_blocks_paginated(
@@ -84,7 +135,7 @@ AS $$
 $$;
 
 -- ============================================================================
--- 3. Update trg_rt_hourly_rewards to use block_time column
+-- 7. Update trg_rt_hourly_rewards to use block_time column
 -- ============================================================================
 
 CREATE OR REPLACE FUNCTION api.trg_rt_hourly_rewards()
@@ -115,7 +166,7 @@ END;
 $$ LANGUAGE plpgsql;
 
 -- ============================================================================
--- 4. Update trg_rt_daily_rewards to use block_time column
+-- 8. Update trg_rt_daily_rewards to use block_time column
 -- ============================================================================
 
 CREATE OR REPLACE FUNCTION api.trg_rt_daily_rewards()
