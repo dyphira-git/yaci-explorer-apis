@@ -326,6 +326,14 @@ async function refreshMaterializedViews(pool: pg.Pool): Promise<void> {
 			}
 		}
 
+		// Refresh chain stats (latest_block, total_transactions) since triggers were
+		// removed in migration 061 to prevent deadlocks under concurrent block inserts
+		try {
+			await client.query(`SELECT api.refresh_rt_chain_stats()`)
+		} catch (err: any) {
+			console.warn(`[MVRefresh] Skipping refresh_rt_chain_stats: ${err.message}`)
+		}
+
 		// Reconcile rt_chain_stats.unique_addresses from the expensive DISTINCT query
 		// This is too costly for triggers but fine at 15-minute intervals
 		try {
