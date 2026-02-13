@@ -309,9 +309,9 @@ async function refreshMaterializedViews(pool: pg.Pool): Promise<void> {
 	//   mv_chain_stats -> rt_chain_stats
 	//   mv_hourly_rewards -> rt_hourly_rewards
 	//   mv_network_overview -> get_network_overview() reads live tables
+	//   mv_daily_rewards -> rt_daily_rewards (migration 065)
 	const views = [
 		'api.mv_validator_delegator_counts',
-		'api.mv_daily_rewards',
 		'api.mv_validator_leaderboard',
 	]
 
