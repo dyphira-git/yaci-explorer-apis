@@ -615,8 +615,9 @@ class ChainQueryClient {
 		const stub = this.getStub('cosmos.staking.v1beta1.Query', this.stakingMethods())
 
 		return new Promise((resolve, reject) => {
-			stub.Validator(
-				{ validatorAddr },
+			stub.Validators(
+				{ status: status || '', pagination: { limit: 500, countTotal: true } },
+				{ deadline: new Date(Date.now() + 8000) },
 				(err: Error | null, response: any) => {
 					if (err) {
 						reject(err)
