@@ -574,9 +574,10 @@ class ChainQueryClient {
 		}
 
 		return new Promise((resolve, reject) => {
-			stub.Validators(
-				{ status: status || '', pagination: { limit: 500, countTotal: true } },
-				(err: Error | null, response: any) => {
+			 stub.Validators(
+        { status: status || '', pagination: { limit: 500, countTotal: true } },
+        { deadline: new Date(Date.now() + 8000) },
+        (err: Error | null, response: any) => {
 					if (err) {
 						reject(err)
 						return
@@ -616,8 +617,9 @@ class ChainQueryClient {
 
 		return new Promise((resolve, reject) => {
 			stub.Validator(
-				{ validatorAddr },
-				(err: Error | null, response: any) => {
+    { validatorAddr },
+    { deadline: new Date(Date.now() + 8000) },
+    (err: Error | null, response: any) => {
 					if (err) {
 						reject(err)
 						return
@@ -662,7 +664,7 @@ class ChainQueryClient {
 		const stub = this.getStub('cosmos.staking.v1beta1.Query', this.stakingMethods())
 
 		return new Promise((resolve, reject) => {
-			stub.Pool({}, (err: Error | null, response: any) => {
+			stub.Pool({}, { deadline: new Date(Date.now() + 8000) }, (err: Error | null, response: any) => {
 				if (err) {
 					reject(err)
 					return
