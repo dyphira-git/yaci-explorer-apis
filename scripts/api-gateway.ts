@@ -46,7 +46,7 @@ interface CacheTier {
 
 const CACHE_TIERS: Record<string, CacheTier> = {
 	// Trigger-updated endpoints - data is near-real-time at DB level
-	'/rpc/get_network_overview': { gatewayTtl: 10_000, maxAge: 5, staleWhileRevalidate: 10 },
+	'/rpc/get_network_overview': { gatewayTtl: 60_000, maxAge: 15, staleWhileRevalidate: 60 },
 	'/rpc/get_hourly_rewards': { gatewayTtl: 30_000, maxAge: 15, staleWhileRevalidate: 30 },
 	'/rpc/get_validators_paginated': { gatewayTtl: 10_000, maxAge: 5, staleWhileRevalidate: 10 },
 	'/rpc/get_validator_performance': { gatewayTtl: 30_000, maxAge: 15, staleWhileRevalidate: 30 },
