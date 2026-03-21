@@ -575,7 +575,7 @@ class ChainQueryClient {
 
 		return new Promise((resolve, reject) => {
 			 stub.Validators(
-        { status: status || '', pagination: { limit: 500, countTotal: true } },
+        { status: status || '', pagination: { limit: 2000, countTotal: true } },
         { deadline: new Date(Date.now() + 8000) },
         (err: Error | null, response: any) => {
 					if (err) {
