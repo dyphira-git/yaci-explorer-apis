@@ -339,6 +339,14 @@ async function refreshMaterializedViews(pool: pg.Pool): Promise<void> {
 				console.warn(`[MVRefresh] Skipping refresh_rt_chain_stats: ${err.message}`)
 			}
 
+			// Refresh validator signing stats from block signatures (last 10000 blocks)
+			try {
+				await client.query(`SELECT api.refresh_validator_signing_stats()`)
+				console.log('[MVRefresh] Validator signing stats refreshed')
+			} catch (err: any) {
+				console.warn(`[MVRefresh] Skipping refresh_validator_signing_stats: ${err.message}`)
+			}
+
 			// Reconcile rt_chain_stats.unique_addresses from the expensive DISTINCT query
 			// This is too costly for triggers but fine at 15-minute intervals
 			try {
